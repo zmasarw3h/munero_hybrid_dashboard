@@ -1,0 +1,26 @@
+# FastAPI and Web Framework
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.0
+pydantic-settings==2.5.2
+python-multipart==0.0.17
+
+# Data Processing
+pandas>=2.2.0
+numpy>=1.26.0,<2.0.0
+
+# Database
+sqlalchemy==2.0.36
+
+# AI/LLM
+langchain==0.3.0
+langchain-community==0.3.0
+langchain-core==0.3.0
+langchain-ollama==0.2.0
+
+# Visualization (for server-side rendering if needed)
+plotly==5.24.0
+
+# Utilities
+python-dotenv==1.0.0
+httpx>=0.24.0
