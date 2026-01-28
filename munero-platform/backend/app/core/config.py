@@ -2,8 +2,9 @@
 Core configuration for Munero AI Platform backend.
 Centralized settings for database, LLM, and application behavior.
 """
+import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional, List
 from pydantic_settings import BaseSettings
 
 
@@ -18,7 +19,11 @@ class Settings(BaseSettings):
     
     # API Settings
     API_V1_PREFIX: str = "/api/v1"
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001"]
+    # CORS Origins as a comma-separated string or JSON list
+    # Examples:
+    #   CORS_ORIGINS=http://localhost:3000,http://localhost:3001
+    #   CORS_ORIGINS=["http://localhost:3000","http://localhost:3001"]
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001"
     
     # Database
     DB_FILE: str = str(Path(__file__).parent.parent.parent.parent / "data" / "munero.sqlite")
@@ -47,6 +52,22 @@ class Settings(BaseSettings):
     def model_post_init(self, __context) -> None:
         if not self.DB_URI:
             self.DB_URI = f"sqlite:///{self.DB_FILE}"
+
+    @property
+    def cors_origins_list(self) -> List[str]:
+        value = (self.CORS_ORIGINS or "").strip()
+        if not value:
+            return []
+
+        if value.startswith("["):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [str(origin).strip() for origin in parsed if str(origin).strip()]
+            except Exception:
+                pass
+
+        return [origin.strip() for origin in value.split(",") if origin.strip()]
 
 
 # Singleton instance
