@@ -22,8 +22,9 @@ from app.models import (
     ChartConfig, 
     DashboardFilters
 )
-from app.services.llm_service import LLMService, LLM_CONFIG, DB_PATH
+from app.services.llm_service import LLMService
 from app.services.smart_render import SmartRenderService
+from app.core.config import settings
 
 
 router = APIRouter()
@@ -115,7 +116,10 @@ async def chat_with_data(request: ChatRequest):
     warnings: list[str] = []
     
     print(f"\n{'='*60}")
-    print(f"📨 Chat Request: '{request.message}'")
+    if settings.DEBUG_LOG_PROMPTS:
+        print(f"📨 Chat Request: '{request.message}'")
+    else:
+        print(f"📨 Chat Request received (length={len(request.message)})")
     print(f"   Timestamp: {start_time.isoformat()}")
     print(f"{'='*60}")
     
@@ -133,7 +137,10 @@ async def chat_with_data(request: ChatRequest):
         
         try:
             sql_query = llm_service.generate_sql(request.message, filters)
-            print(f"   ✅ SQL generated: {sql_query[:100]}...")
+            if settings.DEBUG_LOG_PROMPTS:
+                print(f"   ✅ SQL generated: {sql_query[:100]}...")
+            else:
+                print("   ✅ SQL generated")
         except TimeoutError as e:
             print(f"   ⏱️ LLM timeout: {e}")
             return ChatResponse(
@@ -234,7 +241,10 @@ async def chat_with_data(request: ChatRequest):
         print("💬 Step 5: Generating answer text...")
         
         answer_text = smart_render_service.format_answer_text(df, request.message, chart_config)
-        print(f"   ✅ Answer: {answer_text}")
+        if settings.DEBUG_LOG_PROMPTS:
+            print(f"   ✅ Answer: {answer_text}")
+        else:
+            print("   ✅ Answer generated")
         
         # =====================================================================
         # STEP 6: Return Complete Response
@@ -382,7 +392,7 @@ async def export_csv(request: ExportCSVRequest):
         sql_query = f"{sql_query} LIMIT 10000"
         
         # 3. Execute query
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(settings.DB_FILE))
         df = pd.read_sql_query(sql_query, conn)
         conn.close()
         

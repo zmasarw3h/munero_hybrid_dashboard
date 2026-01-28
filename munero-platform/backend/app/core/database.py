@@ -2,18 +2,14 @@
 Database connection and query execution utilities.
 Provides a unified interface for executing SQL queries and returning DataFrames.
 """
-import os
 from typing import Optional
 from sqlalchemy import create_engine
 import pandas as pd
 
-# LOGIC: 
-# __file__ is backend/app/core/database.py
-# We need to navigate up to the project root: backend/app/core -> backend/app -> backend -> munero-platform
-# Then go into /data
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
-DB_PATH = os.path.join(PROJECT_ROOT, "data", "munero.sqlite")
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+from app.core.config import settings
+
+DB_PATH = settings.DB_FILE
+DATABASE_URL = settings.DB_URI
 
 print(f"📊 Connecting to Database at: {DB_PATH}")
 print(f"🔗 Database URL: {DATABASE_URL}")
@@ -45,8 +41,9 @@ def get_data(query: str, params: Optional[dict] = None) -> pd.DataFrame:
         return df
     except Exception as e:
         print(f"❌ Database Error: {e}")
-        print(f"   Query: {query}")
-        print(f"   Params: {params}")
+        if settings.DEBUG_LOG_PROMPTS:
+            print(f"   Query: {query}")
+            print(f"   Params: {params}")
         # Return empty DF on error to prevent API crash
         return pd.DataFrame()
 

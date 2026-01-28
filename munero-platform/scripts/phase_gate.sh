@@ -9,6 +9,7 @@
 #
 # Optional env vars:
 #   PYTHON_BIN=python3
+#   BASE_URL=http://localhost:8000
 #   REQUIRE_OLLAMA=true   # smoke mode: fail if Ollama isn't available
 
 set -euo pipefail
@@ -26,7 +27,7 @@ offline:
 
 smoke:
   - Runs offline gate first
-  - Verifies backend health and dashboard connectivity on http://localhost:8000
+  - Verifies backend health and dashboard connectivity on $BASE_URL (default: http://localhost:8000)
   - Verifies Ollama availability via /api/chat/test (optional; see REQUIRE_OLLAMA)
 EOF
 }
@@ -90,7 +91,7 @@ offline_gate() {
 }
 
 smoke_gate() {
-  local base_url="http://localhost:8000"
+  local base_url="${BASE_URL:-http://localhost:8000}"
 
   echo "============================================================"
   echo "✅ Phase Gate (smoke)"
@@ -100,6 +101,49 @@ smoke_gate() {
 
   require_cmd curl
   require_cmd "${PYTHON_BIN}"
+
+  echo ""
+  echo "== Backend: reachability check =="
+  set +e
+  local reachability_out
+  reachability_out="$("${PYTHON_BIN}" - "${base_url}" <<'PY'
+import socket
+import sys
+from urllib.parse import urlparse
+
+base_url = sys.argv[1]
+u = urlparse(base_url)
+host = u.hostname or "localhost"
+port = u.port or (443 if u.scheme == "https" else 80)
+
+try:
+    sock = socket.create_connection((host, port), timeout=1.0)
+    sock.close()
+    print("OK")
+    sys.exit(0)
+except PermissionError:
+    print("PERMISSION")
+    sys.exit(2)
+except Exception as e:
+    print(f"{type(e).__name__}: {e}")
+    sys.exit(1)
+PY
+)"
+  local reachability_rc=$?
+  set -e
+
+  if [[ ${reachability_rc} -eq 2 ]]; then
+    echo "❌ Cannot connect to ${base_url} (network is blocked in this environment)." >&2
+    echo "   Run this smoke gate from your local terminal, or re-run with network access enabled." >&2
+    exit 1
+  fi
+
+  if [[ ${reachability_rc} -ne 0 ]]; then
+    echo "❌ Backend not reachable at ${base_url} (${reachability_out})." >&2
+    echo "   Start the backend (example): cd munero-platform/backend && ./../scripts/start_backend.sh" >&2
+    echo "   Or set BASE_URL to the correct address/port: BASE_URL=http://127.0.0.1:8000 ./scripts/phase_gate.sh smoke" >&2
+    exit 1
+  fi
 
   echo ""
   echo "== Backend: /health (requires DB) =="

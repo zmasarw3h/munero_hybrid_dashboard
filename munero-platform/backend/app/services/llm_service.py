@@ -14,6 +14,7 @@ from pathlib import Path
 from langchain_ollama import ChatOllama
 
 from app.models import DashboardFilters
+from app.core.config import settings
 
 
 # ============================================================================
@@ -21,16 +22,14 @@ from app.models import DashboardFilters
 # ============================================================================
 
 LLM_CONFIG = {
-    "model": "qwen2.5-coder:7b",
-    "base_url": "http://localhost:11434",
-    "temperature": 0,
-    "llm_timeout": 60,  # Timeout for LLM requests in seconds
-    "sql_timeout": 30,  # Timeout for SQL execution in seconds
+    "model": settings.OLLAMA_MODEL,
+    "base_url": settings.OLLAMA_BASE_URL,
+    "temperature": settings.LLM_TEMPERATURE,
+    "llm_timeout": settings.LLM_TIMEOUT,  # Timeout for LLM requests in seconds
+    "sql_timeout": settings.SQL_TIMEOUT,  # Timeout for SQL execution in seconds
 }
 
-# Database path (relative to backend directory)
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
-DB_PATH = PROJECT_ROOT / "data" / "munero.sqlite"
+DB_PATH = Path(settings.DB_FILE)
 
 
 # ============================================================================

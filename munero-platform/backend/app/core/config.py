@@ -3,7 +3,7 @@ Core configuration for Munero AI Platform backend.
 Centralized settings for database, LLM, and application behavior.
 """
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from pydantic_settings import BaseSettings
 
 
@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Munero AI Platform"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
+    DEBUG_LOG_PROMPTS: bool = False
     
     # API Settings
     API_V1_PREFIX: str = "/api/v1"
@@ -21,7 +22,7 @@ class Settings(BaseSettings):
     
     # Database
     DB_FILE: str = str(Path(__file__).parent.parent.parent.parent / "data" / "munero.sqlite")
-    DB_URI: str = f"sqlite:///{DB_FILE}"
+    DB_URI: Optional[str] = None
     
     # LLM Configuration
     OLLAMA_BASE_URL: str = "http://localhost:11434"
@@ -42,6 +43,10 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+
+    def model_post_init(self, __context) -> None:
+        if not self.DB_URI:
+            self.DB_URI = f"sqlite:///{self.DB_FILE}"
 
 
 # Singleton instance

@@ -10,12 +10,13 @@ from typing import Tuple, Optional, Literal, cast, Dict, Any
 from datetime import date, timedelta
 from langchain_ollama import ChatOllama
 from app.core.database import get_data
+from app.core.config import settings
 from app.models import DashboardFilters, ChartResponse, ChartPoint, AIAnalysisResponse
 
 # Configuration
-LLM_MODEL = "qwen2.5-coder:7b"  # Or your preferred local model
-BASE_URL = "http://localhost:11434"
-LLM_TEMPERATURE = 0
+LLM_MODEL = settings.OLLAMA_MODEL
+BASE_URL = settings.OLLAMA_BASE_URL
+LLM_TEMPERATURE = settings.LLM_TEMPERATURE
 
 # Intent Detection Patterns
 DIAGNOSTIC_PATTERNS = [
@@ -458,8 +459,11 @@ async def process_chat_query_async(question: str, filters: DashboardFilters) -> 
     Returns:
         AIAnalysisResponse: Complete AI analysis with answer, optional SQL, and visualization
     """
-    print(f"🤖 AI Query: '{question}'")
-    print(f"📊 Active Filters: {filters.model_dump()}")
+    if settings.DEBUG_LOG_PROMPTS:
+        print(f"🤖 AI Query: '{question}'")
+        print(f"📊 Active Filters: {filters.model_dump()}")
+    else:
+        print("🤖 AI Query received")
 
     # Step 0: Intent Detection - Route to appropriate handler
     intent = detect_intent(question)
@@ -486,12 +490,14 @@ async def _handle_driver_analysis(question: str, filters: DashboardFilters) -> A
     try:
         # Extract the metric being asked about
         metric = extract_metric_from_question(question)
-        print(f"📊 Detected metric: {metric}")
+        if settings.DEBUG_LOG_PROMPTS:
+            print(f"📊 Detected metric: {metric}")
 
         # Determine comparison periods
         current_period, prior_period = get_comparison_periods(filters)
-        print(f"📅 Current period: {current_period}")
-        print(f"📅 Prior period: {prior_period}")
+        if settings.DEBUG_LOG_PROMPTS:
+            print(f"📅 Current period: {current_period}")
+            print(f"📅 Prior period: {prior_period}")
 
         # Call the driver analysis endpoint
         analysis = await call_driver_analysis(
@@ -557,7 +563,10 @@ def _handle_data_query(question: str, filters: DashboardFilters) -> AIAnalysisRe
         if isinstance(raw_response, list):
             raw_response = str(raw_response[0]) if raw_response else ""
         sql_query = clean_sql_response(str(raw_response))
-        print(f"✅ Generated SQL: {sql_query[:100]}...")
+        if settings.DEBUG_LOG_PROMPTS:
+            print(f"✅ Generated SQL: {sql_query[:100]}...")
+        else:
+            print("✅ SQL generated")
     except Exception as e:
         print(f"❌ LLM Error: {e}")
         return AIAnalysisResponse(
@@ -685,7 +694,10 @@ Summary:"""
         if isinstance(summary_response, list):
             summary_response = str(summary_response[0]) if summary_response else ""
         summary = str(summary_response).strip()
-        print(f"✅ Summary generated: {summary[:100]}...")
+        if settings.DEBUG_LOG_PROMPTS:
+            print(f"✅ Summary generated: {summary[:100]}...")
+        else:
+            print("✅ Summary generated")
     except Exception as e:
         print(f"⚠️  Summary generation failed: {e}")
         summary = f"Analysis complete. Query returned {len(df)} results."
