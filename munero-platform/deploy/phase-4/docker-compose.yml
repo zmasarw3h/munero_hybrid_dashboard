@@ -1,6 +1,17 @@
-version: "3.9"
-
 services:
+  seed_db:
+    image: alpine:3.19
+    restart: "no"
+    env_file:
+      - .env
+    entrypoint: ["/bin/sh", "/usr/local/bin/seed-db.sh"]
+    volumes:
+      - client_data:/data
+      - ../../data:/seed:ro
+      - ./seed-db.sh:/usr/local/bin/seed-db.sh:ro
+    networks:
+      - demo_net
+
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
@@ -25,6 +36,7 @@ services:
     volumes:
       - client_data:/data
     depends_on:
+      - seed_db
       - ollama
     networks:
       - demo_net
@@ -45,11 +57,16 @@ services:
   caddy:
     image: caddy:2.7-alpine
     restart: unless-stopped
+    env_file:
+      - .env
+      - .env.caddy
+    entrypoint: ["/bin/sh", "/usr/local/bin/caddy-entrypoint.sh"]
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy-entrypoint.sh:/usr/local/bin/caddy-entrypoint.sh:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:

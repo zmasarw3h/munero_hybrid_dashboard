@@ -239,6 +239,8 @@ With Caddy:
 ### 7.3 Basic Auth (fastest)
 - Use Basic Auth to restrict access to client users.
 - Rotate passwords as needed.
+- Prefer a service-specific env file (e.g. `deploy/phase-4/.env.caddy`) for bcrypt hashes since `$` characters can get mangled when stored in the special Compose `.env` file.
+- Consider using a plaintext `BASIC_AUTH_PASSWORD` and generating the bcrypt hash at container startup to avoid `$` escaping pitfalls entirely.
 
 Deliverables of Phase 4:
 - A Caddyfile (or Nginx config) that enforces HTTPS + auth and routes correctly.
@@ -276,6 +278,11 @@ Acceptance criteria:
 
 ### 8.3 Data load procedure
 **Chosen:** ship a prepared SQLite DB and mount it as the `client_data` volume.
+
+Recommended implementation (Phase 4 Compose):
+- Place the DB at `munero-platform/data/munero.sqlite` on the VM (not committed).
+- Run `cd munero-platform/deploy/phase-4 && docker compose up -d seed_db` once to populate the `client_data` volume.
+- Then `docker compose up -d` brings up the full stack.
 
 Optional alternative (if you need to rebuild DB on the VM):
 - Ship CSV to the VM and run the ingestion script in the backend container.

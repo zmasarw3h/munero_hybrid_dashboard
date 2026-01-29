@@ -28,6 +28,7 @@ env/
 .env
 .env.*
 !.env.example
+!.env.caddy.example
 .env.local
 
 # IDE
