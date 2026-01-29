@@ -1,0 +1,16 @@
+{
+  email {$ACME_EMAIL}
+}
+
+{$DEMO_DOMAIN} {
+  encode gzip
+
+  basicauth {
+    {$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+  }
+
+  reverse_proxy /api/* backend:8000
+  reverse_proxy /api backend:8000
+  reverse_proxy /health backend:8000
+  reverse_proxy /* frontend:3000
+}
