@@ -1,0 +1,20 @@
+# Secrets / env files (never commit)
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.caddy.example
+
+# Client seed data (never commit)
+munero-platform/data/munero.sqlite
+munero-platform/data/*.sqlite
+
+# Local logs
+*.nohup.out
+munero-platform/backend.nohup.out
+
+# Local caches / deps
+**/__pycache__/
+**/.pytest_cache/
+**/node_modules/
+**/.next/
+munero-platform/venv/
