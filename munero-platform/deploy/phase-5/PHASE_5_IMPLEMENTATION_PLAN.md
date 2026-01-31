@@ -35,6 +35,9 @@ Optional but recommended validation on your dev machine:
 
 ## B) Provision the VM (CPU-first; GPU optional)
 
+Primary reference for this part:
+- `munero-platform/deploy/phase-5/VM_PROVISION.md`
+
 Collect inputs:
 - [ ] `DEMO_DOMAIN` (DNS name), `ACME_EMAIL`
 - [ ] `OLLAMA_MODEL`
@@ -45,14 +48,16 @@ VM sizing (RAM is driven by `OLLAMA_MODEL`):
 - [ ] Choose a VM size that can run your model without OOM (see `munero-platform/deploy/phase-5/DEPLOY.md`).
 
 Provisioning checklist:
-- [ ] Create VM
+- [ ] Create VM (see `munero-platform/deploy/phase-5/VM_PROVISION.md`)
 - [ ] Configure firewall/security group:
   - [ ] Allow inbound `80/tcp` and `443/tcp` from the internet
   - [ ] Restrict SSH to your IP (or provider console)
   - [ ] Do **not** expose `3000`, `8000`, or `11434` publicly
 - [ ] Install Docker + Docker Compose v2
+  - [ ] On Ubuntu: `bash munero-platform/deploy/phase-5/vm-bootstrap-ubuntu.sh`
 - [ ] Confirm DNS:
   - [ ] `dig +short "$DEMO_DOMAIN"` returns the VM IP
+  - [ ] (Optional helper) `DEMO_DOMAIN=... EXPECTED_IP=... bash munero-platform/deploy/phase-5/vm-preflight.sh`
 
 GPU optional:
 - [ ] If using a GPU VM: install NVIDIA drivers + NVIDIA Container Toolkit per provider docs

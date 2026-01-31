@@ -43,6 +43,11 @@ On a fresh Ubuntu VM (or similar):
 4. Confirm DNS is correct before deploy:
    - `dig +short "$DEMO_DOMAIN"` should return the VM IP
 
+Provisioning helpers (repo artifacts):
+- `munero-platform/deploy/phase-5/VM_PROVISION.md` (provider-agnostic checklist + Ubuntu examples)
+- `munero-platform/deploy/phase-5/vm-bootstrap-ubuntu.sh` (Docker + Compose v2 install helper)
+- `munero-platform/deploy/phase-5/vm-preflight.sh` (DNS + basic readiness checks)
+
 GPU optional:
 - Install NVIDIA drivers + NVIDIA Container Toolkit per your provider’s guidance.
 
