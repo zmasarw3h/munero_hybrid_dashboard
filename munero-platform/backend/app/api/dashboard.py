@@ -31,6 +31,35 @@ import hashlib
 
 router = APIRouter()
 
+def _sql_numeric_expr(column: str) -> str:
+    """
+    Return a SQL expression that coerces numeric-like values in hosted Postgres.
+
+    This helps when ingested datasets store numeric fields as TEXT.
+    """
+    if settings.db_dialect == "postgresql":
+        # Coerce to float while tolerating blank strings and common formatting.
+        # - `::text` works for both TEXT and numeric column types.
+        # - `regexp_replace` strips commas/currency symbols if present.
+        # - NULLIF avoids casting empty strings.
+        return (
+            "NULLIF("
+            f"regexp_replace({column}::text, '[^0-9.+-]', '', 'g')"
+            ", '')::double precision"
+        )
+    return column
+
+
+def _sql_date_cast_expr(date_column: str) -> str:
+    """
+    Return a SQL expression that evaluates to a DATE (dialect-aware).
+    """
+    if settings.db_dialect == "postgresql":
+        # Avoid casting blank strings which would raise an error in Postgres.
+        return f"NULLIF({date_column}::text, '')::date"
+    return date_column
+
+
 def _sql_date_label_expr(date_column: str, granularity: Literal["day", "month", "year"]) -> str:
     """
     Build a SQL expression that formats a date column into a string label.
@@ -38,7 +67,7 @@ def _sql_date_label_expr(date_column: str, granularity: Literal["day", "month", 
     """
     if settings.db_dialect == "postgresql":
         fmt = {"day": "YYYY-MM-DD", "month": "YYYY-MM", "year": "YYYY"}[granularity]
-        return f"to_char({date_column}::date, '{fmt}')"
+        return f"to_char({_sql_date_cast_expr(date_column)}, '{fmt}')"
 
     # SQLite default (dates stored as TEXT in YYYY-MM-DD format)
     fmt = {"day": "%Y-%m-%d", "month": "%Y-%m", "year": "%Y"}[granularity]
@@ -53,9 +82,10 @@ def _sql_cutoff_from_max_date(date_column: str, *, days: int | None = None, mont
         raise ValueError("Provide exactly one of days or months")
 
     if settings.db_dialect == "postgresql":
+        date_expr = _sql_date_cast_expr(date_column)
         if months is not None:
-            return f"(SELECT MAX({date_column}::date) - INTERVAL '{months} months' FROM fact_orders)"
-        return f"(SELECT MAX({date_column}::date) - INTERVAL '{days} days' FROM fact_orders)"
+            return f"(SELECT (MAX({date_expr}) - INTERVAL '{months} months')::date FROM fact_orders)"
+        return f"(SELECT (MAX({date_expr}) - INTERVAL '{days} days')::date FROM fact_orders)"
 
     # SQLite
     if months is not None:
@@ -83,14 +113,15 @@ def build_where_clause(filters: DashboardFilters) -> tuple[str, dict]:
     """
     conditions = ["1=1"]  # Default always true - simplifies AND chaining
     params = {}
+    order_date_expr = _sql_date_cast_expr("order_date")
 
     # Date Range Filters
     if filters.start_date:
-        conditions.append("order_date >= :start_date")
+        conditions.append(f"{order_date_expr} >= :start_date")
         params["start_date"] = str(filters.start_date)
     
     if filters.end_date:
-        conditions.append("order_date <= :end_date")
+        conditions.append(f"{order_date_expr} <= :end_date")
         params["end_date"] = str(filters.end_date)
     
     # List Filters - Only apply if list is not empty (empty = select all)
@@ -173,9 +204,9 @@ def get_headline_stats(filters: DashboardFilters):
     # Query: Aggregated metrics
     # Note: Using order_price_in_aed as the standard 'Revenue'
     query = f"""
-        SELECT 
+        SELECT
             COUNT(DISTINCT order_number) as total_orders,
-            SUM(order_price_in_aed) as total_revenue,
+            SUM({_sql_numeric_expr("order_price_in_aed")}) as total_revenue,
             COUNT(DISTINCT product_brand) as distinct_brands,
             COUNT(DISTINCT client_name) as distinct_clients
         FROM fact_orders
@@ -311,9 +342,9 @@ def get_sales_trend(filters: DashboardFilters, granularity: Literal['day', 'mont
     
     # 1. Fetch Aggregated Data
     query = f"""
-        SELECT 
+        SELECT
             {date_label_expr} as date_label,
-            SUM(order_price_in_aed) as revenue,
+            SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue,
             COUNT(DISTINCT order_number) as orders
         FROM fact_orders
         WHERE {where_sql}
@@ -426,14 +457,14 @@ def get_leaderboard(
     query = f"""
         SELECT
             {db_col} as label,
-            SUM(order_price_in_aed) as revenue,
+            SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue,
             COUNT(DISTINCT order_number) as orders,
-            SUM(cogs_in_aed) as total_cogs
+            SUM({_sql_numeric_expr("cogs_in_aed")}) as total_cogs
         FROM fact_orders
         WHERE {where_sql}
-        GROUP BY label
-        HAVING revenue > 0
-        ORDER BY revenue DESC
+        GROUP BY 1
+        HAVING SUM({_sql_numeric_expr("order_price_in_aed")}) > 0
+        ORDER BY 2 DESC
         LIMIT 50
     """
 
@@ -473,9 +504,9 @@ def get_leaderboard(
             SELECT
                 {db_col} as label,
                 {_sql_date_label_expr("order_date", "month")} as month,
-                SUM(order_price_in_aed) as monthly_revenue
+                SUM({_sql_numeric_expr("order_price_in_aed")}) as monthly_revenue
             FROM fact_orders
-            WHERE order_date >= {_sql_cutoff_from_max_date("order_date", months=6)}
+            WHERE {_sql_date_cast_expr("order_date")} >= {_sql_cutoff_from_max_date("order_date", months=6)}
               AND {db_col} IN ({','.join(entity_placeholders)})
             GROUP BY 1, 2
             ORDER BY 1, 2 ASC
@@ -518,16 +549,16 @@ def get_leaderboard(
 
         growth_query = f"""
             WITH current_period AS (
-                SELECT product_name, SUM(order_price_in_aed) as revenue
+                SELECT product_name, SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue
                 FROM fact_orders
-                WHERE order_date >= :current_start AND order_date <= :current_end
+                WHERE {_sql_date_cast_expr("order_date")} >= :current_start AND {_sql_date_cast_expr("order_date")} <= :current_end
                   AND product_name IN ({','.join(entity_placeholders)})
                 GROUP BY product_name
             ),
             prior_period AS (
-                SELECT product_name, SUM(order_price_in_aed) as revenue
+                SELECT product_name, SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue
                 FROM fact_orders
-                WHERE order_date >= :prior_start AND order_date <= :prior_end
+                WHERE {_sql_date_cast_expr("order_date")} >= :prior_start AND {_sql_date_cast_expr("order_date")} <= :prior_end
                   AND product_name IN ({','.join(entity_placeholders)})
                 GROUP BY product_name
             )
@@ -618,7 +649,7 @@ def get_top_products(filters: DashboardFilters, limit: int = 10):
     query = f"""
         SELECT 
             product_name,
-            SUM(order_price_in_aed) as total_revenue
+            SUM({_sql_numeric_expr("order_price_in_aed")}) as total_revenue
         FROM fact_orders
         WHERE {where_sql}
         GROUP BY product_name
@@ -689,7 +720,7 @@ def get_client_scatter(filters: DashboardFilters):
             client_name,
             client_country,
             order_type,
-            SUM(order_price_in_aed) as type_revenue,
+            SUM({_sql_numeric_expr("order_price_in_aed")}) as type_revenue,
             COUNT(DISTINCT order_number) as type_orders
         FROM fact_orders
         WHERE {where_sql}
@@ -1012,19 +1043,20 @@ def get_sparkline_data(metric: str, days: int = 30):
     if metric == "orders":
         agg_expr = "COUNT(DISTINCT order_number)"
     else:  # revenue
-        agg_expr = "SUM(order_price_in_aed)"
-    
+        agg_expr = f"SUM({_sql_numeric_expr('order_price_in_aed')})"
+
     # Get the most recent date in the database and work backwards from there
     # This handles cases where data is historical (e.g., June 2025 only)
     cutoff_expr = _sql_cutoff_from_max_date("order_date", days=days)
+    order_date_expr = _sql_date_cast_expr("order_date")
     query = f"""
-        SELECT 
-            order_date as date,
+        SELECT
+            {order_date_expr} as date,
             {agg_expr} as value
         FROM fact_orders
-        WHERE order_date >= {cutoff_expr}
-        GROUP BY order_date
-        ORDER BY order_date
+        WHERE {order_date_expr} >= {cutoff_expr}
+        GROUP BY 1
+        ORDER BY 1
     """
     
     df = get_data(query)
@@ -1071,7 +1103,7 @@ def get_geography_data(filters: DashboardFilters):
     query = f"""
         SELECT 
             client_country as country_name,
-            SUM(order_price_in_aed) as revenue,
+            SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue,
             COUNT(DISTINCT order_number) as orders,
             COUNT(DISTINCT client_name) as clients
         FROM fact_orders
@@ -1150,7 +1182,7 @@ def get_top_products_by_status(filters: DashboardFilters, limit: int = 10):
             product_name,
             product_sku,
             product_brand as brand,
-            SUM(order_price_in_aed) as total_revenue,
+            SUM({_sql_numeric_expr("order_price_in_aed")}) as total_revenue,
             COUNT(DISTINCT order_number) as total_count
         FROM fact_orders
         WHERE {where_sql}
@@ -1229,9 +1261,9 @@ def get_top_brands_by_type(filters: DashboardFilters, limit: int = 10):
     query = f"""
         SELECT 
             product_brand as brand_name,
-            SUM(order_price_in_aed) as total_revenue,
-            SUM(CASE WHEN order_type = 'gift_card' THEN order_price_in_aed ELSE 0 END) as gift_card_revenue,
-            SUM(CASE WHEN order_type = 'merchandise' THEN order_price_in_aed ELSE 0 END) as merchandise_revenue,
+            SUM({_sql_numeric_expr("order_price_in_aed")}) as total_revenue,
+            SUM(CASE WHEN order_type = 'gift_card' THEN {_sql_numeric_expr("order_price_in_aed")} ELSE 0 END) as gift_card_revenue,
+            SUM(CASE WHEN order_type = 'merchandise' THEN {_sql_numeric_expr("order_price_in_aed")} ELSE 0 END) as merchandise_revenue,
             COUNT(DISTINCT CASE WHEN order_type = 'gift_card' THEN order_number END) as gift_card_orders,
             COUNT(DISTINCT CASE WHEN order_type = 'merchandise' THEN order_number END) as merchandise_orders
         FROM fact_orders
@@ -1317,7 +1349,7 @@ def get_catalog_kpis(filters: DashboardFilters):
     sku_query = f"""
         SELECT COUNT(DISTINCT product_sku) as active_skus
         FROM fact_orders
-        WHERE {where_sql} AND product_sku IS NOT NULL AND quantity > 0
+        WHERE {where_sql} AND product_sku IS NOT NULL AND {_sql_numeric_expr("quantity")} > 0
     """
     sku_df = get_data(sku_query, params)
     active_skus = int(sku_df.iloc[0]['active_skus']) if not sku_df.empty else 0
@@ -1334,10 +1366,10 @@ def get_catalog_kpis(filters: DashboardFilters):
     # Query 3: Average margin (only where COGS exists)
     margin_query = f"""
         SELECT AVG(
-            (order_price_in_aed - COALESCE(cogs_in_aed, 0)) / NULLIF(order_price_in_aed, 0) * 100
+            ({_sql_numeric_expr("order_price_in_aed")} - COALESCE({_sql_numeric_expr("cogs_in_aed")}, 0)) / NULLIF({_sql_numeric_expr("order_price_in_aed")}, 0) * 100
         ) as avg_margin
         FROM fact_orders
-        WHERE {where_sql} AND cogs_in_aed > 0 AND order_price_in_aed > 0
+        WHERE {where_sql} AND {_sql_numeric_expr("cogs_in_aed")} > 0 AND {_sql_numeric_expr("order_price_in_aed")} > 0
     """
     margin_df = get_data(margin_query, params)
     avg_margin = float(margin_df.iloc[0]['avg_margin']) if not margin_df.empty and margin_df.iloc[0]['avg_margin'] is not None else None
@@ -1346,14 +1378,14 @@ def get_catalog_kpis(filters: DashboardFilters):
     # SQLite doesn't support FILTER, so we use CASE expressions
     supplier_query = f"""
         WITH total_revenue AS (
-            SELECT SUM(order_price_in_aed) as total
+            SELECT SUM({_sql_numeric_expr("order_price_in_aed")}) as total
             FROM fact_orders
             WHERE {where_sql}
         ),
         supplier_shares AS (
             SELECT
                 supplier_name,
-                SUM(order_price_in_aed) * 100.0 / (SELECT total FROM total_revenue) as share_pct
+                SUM({_sql_numeric_expr("order_price_in_aed")}) * 100.0 / (SELECT total FROM total_revenue) as share_pct
             FROM fact_orders
             WHERE {where_sql}
             GROUP BY supplier_name
@@ -1383,8 +1415,8 @@ def get_catalog_kpis(filters: DashboardFilters):
         prior_sku_query = f"""
             SELECT COUNT(DISTINCT product_sku) as active_skus
             FROM fact_orders
-            WHERE order_date >= :prior_start AND order_date <= :prior_end
-              AND product_sku IS NOT NULL AND quantity > 0
+            WHERE {_sql_date_cast_expr("order_date")} >= :prior_start AND {_sql_date_cast_expr("order_date")} <= :prior_end
+              AND product_sku IS NOT NULL AND {_sql_numeric_expr("quantity")} > 0
         """
         prior_sku_params = {"prior_start": str(prior_start), "prior_end": str(prior_end)}
 
@@ -1409,7 +1441,7 @@ def get_catalog_kpis(filters: DashboardFilters):
         prior_currency_query = f"""
             SELECT COUNT(DISTINCT currency) as currency_count
             FROM fact_orders
-            WHERE order_date >= :prior_start AND order_date <= :prior_end
+            WHERE {_sql_date_cast_expr("order_date")} >= :prior_start AND {_sql_date_cast_expr("order_date")} <= :prior_end
         """
         prior_currency_df = get_data(prior_currency_query, prior_sku_params)
         if not prior_currency_df.empty:
@@ -1419,11 +1451,11 @@ def get_catalog_kpis(filters: DashboardFilters):
         # Prior avg margin
         prior_margin_query = f"""
             SELECT AVG(
-                (order_price_in_aed - COALESCE(cogs_in_aed, 0)) / NULLIF(order_price_in_aed, 0) * 100
+                ({_sql_numeric_expr("order_price_in_aed")} - COALESCE({_sql_numeric_expr("cogs_in_aed")}, 0)) / NULLIF({_sql_numeric_expr("order_price_in_aed")}, 0) * 100
             ) as avg_margin
             FROM fact_orders
-            WHERE order_date >= :prior_start AND order_date <= :prior_end
-              AND cogs_in_aed > 0 AND order_price_in_aed > 0
+            WHERE {_sql_date_cast_expr("order_date")} >= :prior_start AND {_sql_date_cast_expr("order_date")} <= :prior_end
+              AND {_sql_numeric_expr("cogs_in_aed")} > 0 AND {_sql_numeric_expr("order_price_in_aed")} > 0
         """
         prior_margin_df = get_data(prior_margin_query, prior_sku_params)
         if not prior_margin_df.empty and prior_margin_df.iloc[0]['avg_margin'] is not None and avg_margin is not None:
@@ -1479,18 +1511,18 @@ def get_product_scatter(filters: DashboardFilters):
             product_name,
             product_sku,
             order_type,
-            SUM(order_price_in_aed) as total_revenue,
-            SUM(quantity) as total_quantity,
+            SUM({_sql_numeric_expr("order_price_in_aed")}) as total_revenue,
+            SUM({_sql_numeric_expr("quantity")}) as total_quantity,
             COUNT(DISTINCT order_number) as total_orders,
             AVG(
-                CASE WHEN order_price_in_aed > 0 AND cogs_in_aed > 0
-                THEN (order_price_in_aed - COALESCE(cogs_in_aed, 0)) / order_price_in_aed * 100
+                CASE WHEN {_sql_numeric_expr("order_price_in_aed")} > 0 AND {_sql_numeric_expr("cogs_in_aed")} > 0
+                THEN ({_sql_numeric_expr("order_price_in_aed")} - COALESCE({_sql_numeric_expr("cogs_in_aed")}, 0)) / {_sql_numeric_expr("order_price_in_aed")} * 100
                 ELSE NULL END
             ) as avg_margin
         FROM fact_orders
         WHERE {where_sql}
         GROUP BY product_name, product_sku, order_type
-        HAVING total_revenue > 0
+        HAVING SUM({_sql_numeric_expr("order_price_in_aed")}) > 0
     """
 
     df = get_data(query, params)
@@ -1631,16 +1663,16 @@ def get_product_movers(filters: DashboardFilters):
 
     movers_query = f"""
         WITH current_period AS (
-            SELECT product_name, SUM(order_price_in_aed) as revenue
+            SELECT product_name, SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue
             FROM fact_orders
-            WHERE order_date >= :current_start AND order_date <= :current_end
+            WHERE {_sql_date_cast_expr("order_date")} >= :current_start AND {_sql_date_cast_expr("order_date")} <= :current_end
               {extra_filters}
             GROUP BY product_name
         ),
         prior_period AS (
-            SELECT product_name, SUM(order_price_in_aed) as revenue
+            SELECT product_name, SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue
             FROM fact_orders
-            WHERE order_date >= :prior_start AND order_date <= :prior_end
+            WHERE {_sql_date_cast_expr("order_date")} >= :prior_start AND {_sql_date_cast_expr("order_date")} <= :prior_end
               {extra_filters}
             GROUP BY product_name
         )
@@ -1661,16 +1693,16 @@ def get_product_movers(filters: DashboardFilters):
     # Query for fallers (bottom 5 by growth ASC)
     fallers_query = f"""
         WITH current_period AS (
-            SELECT product_name, SUM(order_price_in_aed) as revenue
+            SELECT product_name, SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue
             FROM fact_orders
-            WHERE order_date >= :current_start AND order_date <= :current_end
+            WHERE {_sql_date_cast_expr("order_date")} >= :current_start AND {_sql_date_cast_expr("order_date")} <= :current_end
               {extra_filters}
             GROUP BY product_name
         ),
         prior_period AS (
-            SELECT product_name, SUM(order_price_in_aed) as revenue
+            SELECT product_name, SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue
             FROM fact_orders
-            WHERE order_date >= :prior_start AND order_date <= :prior_end
+            WHERE {_sql_date_cast_expr("order_date")} >= :prior_start AND {_sql_date_cast_expr("order_date")} <= :prior_end
               {extra_filters}
             GROUP BY product_name
         )
