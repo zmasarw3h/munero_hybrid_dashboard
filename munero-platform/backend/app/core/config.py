@@ -3,6 +3,7 @@ Core configuration for Munero AI Platform backend.
 Centralized settings for database, LLM, and application behavior.
 """
 import json
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Optional, List
 from pydantic import AliasChoices, Field
@@ -70,6 +71,13 @@ class Settings(BaseSettings):
         # Normalize common but non-SQLAlchemy DSN scheme
         if self.DB_URI and self.DB_URI.startswith("postgres://"):
             self.DB_URI = self.DB_URI.replace("postgres://", "postgresql://", 1)
+
+        # SQLAlchemy defaults to the psycopg2 driver for "postgresql://" URLs.
+        # Our hosted stack uses psycopg (v3) via `psycopg[binary]`, so make the
+        # driver explicit when a plain Postgres URL is provided (e.g. from
+        # Supabase or Render).
+        if self.DB_URI and self.DB_URI.startswith("postgresql://") and find_spec("psycopg") is not None:
+            self.DB_URI = self.DB_URI.replace("postgresql://", "postgresql+psycopg://", 1)
 
         if not self.DB_URI:
             self.DB_URI = f"sqlite:///{self.DB_FILE}"
