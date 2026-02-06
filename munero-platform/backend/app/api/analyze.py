@@ -2,6 +2,7 @@
 Driver Analysis API endpoints.
 Provides variance analysis to answer "why did X change?" questions.
 """
+import logging
 from fastapi import APIRouter, HTTPException
 from typing import Dict, List, Optional
 from app.models import (
@@ -12,11 +13,13 @@ from app.models import (
     DashboardFilters,
     MetaResponse
 )
+from app.core.config import settings
 from app.core.database import get_data
 from datetime import datetime
 import pandas as pd
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def build_filter_clause(filters: Optional[DashboardFilters]) -> tuple[str, dict]:
@@ -226,7 +229,12 @@ def analyze_drivers(request: DriverAnalysisRequest):
     }
     ```
     """
-    print(f"🔍 Driver Analysis: metric={request.metric}, current={request.current_period}, prior={request.prior_period}")
+    logger.info(
+        "🔍 Driver analysis request (metric=%s, current=%s, prior=%s)",
+        request.metric,
+        request.current_period,
+        request.prior_period,
+    )
 
     # 1. Build filter clause (excluding date filters)
     filter_clause, filter_params = build_filter_clause(request.filters)
@@ -286,7 +294,14 @@ def analyze_drivers(request: DriverAnalysisRequest):
     elif total_change < 0:
         direction = "decrease"
 
-    print(f"📊 Totals: Current={current_total:.2f}, Prior={prior_total:.2f}, Change={total_change:.2f} ({total_change_pct}%)")
+    if settings.DEBUG:
+        logger.debug(
+            "📊 Totals: current=%.2f prior=%.2f change=%.2f change_pct=%s",
+            current_total,
+            prior_total,
+            total_change,
+            total_change_pct,
+        )
 
     # 3. Analyze each dimension
     drivers: Dict[str, List[DriverEntity]] = {}
@@ -297,10 +312,11 @@ def analyze_drivers(request: DriverAnalysisRequest):
 
     for dimension in request.dimensions:
         if dimension not in valid_dimensions:
-            print(f"⚠️ Skipping invalid dimension: {dimension}")
+            logger.warning("⚠️ Skipping invalid dimension: %s", dimension)
             continue
 
-        print(f"   Analyzing dimension: {dimension}")
+        if settings.DEBUG:
+            logger.debug("   Analyzing dimension: %s", dimension)
         dimension_drivers = analyze_dimension(
             dimension=dimension,
             metric=request.metric,
@@ -346,9 +362,14 @@ def analyze_drivers(request: DriverAnalysisRequest):
                 )
                 break
 
-    print(f"✅ Driver Analysis complete: {len(drivers)} dimensions analyzed")
+    logger.info("✅ Driver analysis complete: %s dimensions analyzed", len(drivers))
     if "primary_driver" in summary:
-        print(f"   Primary driver: {summary['primary_driver'].entity} ({summary['primary_driver'].contribution}% of change)")
+        if settings.DEBUG:
+            logger.debug(
+                "   Primary driver: %s (%s%% of change)",
+                summary["primary_driver"].entity,
+                summary["primary_driver"].contribution,
+            )
 
     return DriverAnalysisResponse(
         metric=request.metric,
@@ -375,7 +396,8 @@ def get_meta():
     - `refresh_schedule`: Expected data refresh schedule
     - `total_records`: Total number of records in the database
     """
-    print("🔍 Fetching data freshness metadata")
+    if settings.DEBUG:
+        logger.debug("🔍 Fetching data freshness metadata")
 
     # Query for max date and count
     query = """
@@ -402,11 +424,11 @@ def get_meta():
 
         total_records = int(row['total_records']) if pd.notna(row['total_records']) else None
 
-    print(f"✅ Meta: Last updated={last_updated}, Records={total_records}")
+    logger.info("✅ Meta: last_updated=%s records=%s", last_updated, total_records)
 
     return MetaResponse(
         last_updated=last_updated,
-        data_source="munero.sqlite",
+        data_source=settings.db_dialect,
         refresh_schedule="Daily at 2:00 AM UTC",
         total_records=total_records
     )

@@ -5,6 +5,7 @@ Centralized settings for database, LLM, and application behavior.
 import json
 from pathlib import Path
 from typing import Optional, List
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
 
@@ -14,7 +15,9 @@ class Settings(BaseSettings):
     # Application
     APP_NAME: str = "Munero AI Platform"
     APP_VERSION: str = "1.0.0"
-    DEBUG: bool = True
+    # Production-safe defaults. Enable only for local development.
+    DEBUG: bool = False
+    # WARNING: When enabled, logs may include sensitive user prompts/responses.
     DEBUG_LOG_PROMPTS: bool = False
     
     # API Settings
@@ -27,13 +30,27 @@ class Settings(BaseSettings):
     
     # Database
     DB_FILE: str = str(Path(__file__).parent.parent.parent.parent / "data" / "munero.sqlite")
-    DB_URI: Optional[str] = None
+    # Allow common hosting env var name (DATABASE_URL)
+    DB_URI: Optional[str] = Field(default=None, validation_alias=AliasChoices("DB_URI", "DATABASE_URL"))
+    # Postgres per-statement timeout (milliseconds). Applied via connection options.
+    DB_STATEMENT_TIMEOUT_MS: int = 30000
     
     # LLM Configuration
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen2.5-coder:7b"
+    # Provider name. For hosted deployments, default to Gemini.
+    LLM_PROVIDER: str = "gemini"
+    # Provider API key (server-side only). Supports common aliases.
+    LLM_API_KEY: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("LLM_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    )
+    # Provider model name. For Gemini, e.g. "gemini-2.5-flash".
+    LLM_MODEL: str = "gemini-2.5-flash"
+    # Provider base URL (for Gemini API, this is the Generative Language API base).
+    LLM_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     LLM_TEMPERATURE: float = 0.0
     LLM_TIMEOUT: int = 60  # seconds
+    LLM_MAX_OUTPUT_TOKENS: int = 512
+    LLM_RETRIES: int = 2
     SQL_TIMEOUT: int = 30  # seconds
     
     # Query Settings
@@ -50,6 +67,10 @@ class Settings(BaseSettings):
         case_sensitive = True
 
     def model_post_init(self, __context) -> None:
+        # Normalize common but non-SQLAlchemy DSN scheme
+        if self.DB_URI and self.DB_URI.startswith("postgres://"):
+            self.DB_URI = self.DB_URI.replace("postgres://", "postgresql://", 1)
+
         if not self.DB_URI:
             self.DB_URI = f"sqlite:///{self.DB_FILE}"
 
@@ -68,6 +89,21 @@ class Settings(BaseSettings):
                 pass
 
         return [origin.strip() for origin in value.split(",") if origin.strip()]
+
+    @property
+    def db_dialect(self) -> str:
+        """
+        A lightweight database dialect hint used for SQL string generation.
+
+        Returns:
+            "sqlite", "postgresql", or "unknown"
+        """
+        uri = (self.DB_URI or "").lower()
+        if uri.startswith("sqlite"):
+            return "sqlite"
+        if uri.startswith("postgres"):
+            return "postgresql"
+        return "unknown"
 
 
 # Singleton instance

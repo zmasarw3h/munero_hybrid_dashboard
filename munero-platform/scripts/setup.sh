@@ -35,7 +35,18 @@ backend/venv/bin/pip install --quiet -r backend/requirements.txt
 echo "✅ Dependencies installed"
 
 # Step 3: Create database if it doesn't exist
-if [ ! -f "data/munero.sqlite" ]; then
+if [ -n "${DATABASE_URL:-}" ] || [ -n "${DB_URI:-}" ]; then
+    echo ""
+    echo "🗄️  Detected DATABASE_URL/DB_URI in environment; skipping local SQLite setup."
+    echo "   To ingest CSVs into Postgres, run:"
+    if [ -n "${DATABASE_URL:-}" ]; then
+        echo '   python3 scripts/ingest_postgres.py --db-url "$DATABASE_URL" --csv-dir "$MUNERO_CSV_DIR"'
+    else
+        echo '   python3 scripts/ingest_postgres.py --db-url "$DB_URI" --csv-dir "$MUNERO_CSV_DIR"'
+    fi
+    echo ""
+    echo "   (Set MUNERO_CSV_DIR to the directory containing the Munero CSV files.)"
+elif [ ! -f "data/munero.sqlite" ]; then
     echo ""
     echo "💾 Creating database from CSV files..."
     python3 scripts/ingest_data.py

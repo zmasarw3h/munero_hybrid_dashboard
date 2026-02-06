@@ -22,6 +22,7 @@ from app.models import (
     TrendItem, ProductMoversResponse
 )
 from app.core.database import get_data
+from app.core.config import settings
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -29,6 +30,37 @@ import random
 import hashlib
 
 router = APIRouter()
+
+def _sql_date_label_expr(date_column: str, granularity: Literal["day", "month", "year"]) -> str:
+    """
+    Build a SQL expression that formats a date column into a string label.
+    Supports SQLite and PostgreSQL based on current settings.
+    """
+    if settings.db_dialect == "postgresql":
+        fmt = {"day": "YYYY-MM-DD", "month": "YYYY-MM", "year": "YYYY"}[granularity]
+        return f"to_char({date_column}::date, '{fmt}')"
+
+    # SQLite default (dates stored as TEXT in YYYY-MM-DD format)
+    fmt = {"day": "%Y-%m-%d", "month": "%Y-%m", "year": "%Y"}[granularity]
+    return f"strftime('{fmt}', {date_column})"
+
+
+def _sql_cutoff_from_max_date(date_column: str, *, days: int | None = None, months: int | None = None) -> str:
+    """
+    Returns a SQL subquery expression that computes a cutoff date relative to MAX(date_column).
+    """
+    if (days is None) == (months is None):
+        raise ValueError("Provide exactly one of days or months")
+
+    if settings.db_dialect == "postgresql":
+        if months is not None:
+            return f"(SELECT MAX({date_column}::date) - INTERVAL '{months} months' FROM fact_orders)"
+        return f"(SELECT MAX({date_column}::date) - INTERVAL '{days} days' FROM fact_orders)"
+
+    # SQLite
+    if months is not None:
+        return f"(SELECT date(MAX({date_column}), '-{months} months') FROM fact_orders)"
+    return f"(SELECT date(MAX({date_column}), '-{days} days') FROM fact_orders)"
 
 
 def build_where_clause(filters: DashboardFilters) -> tuple[str, dict]:
@@ -275,24 +307,18 @@ def get_sales_trend(filters: DashboardFilters, granularity: Literal['day', 'mont
     **Response**: Dual-axis chart data with anomaly flags and growth metrics
     """
     where_sql, params = build_where_clause(filters)
-    # Set date format based on granularity
-    if granularity == 'year':
-        date_format = "%Y"
-    elif granularity == 'month':
-        date_format = "%Y-%m"
-    else:  # day
-        date_format = "%Y-%m-%d"
+    date_label_expr = _sql_date_label_expr("order_date", granularity)
     
     # 1. Fetch Aggregated Data
     query = f"""
         SELECT 
-            strftime('{date_format}', order_date) as date_label,
+            {date_label_expr} as date_label,
             SUM(order_price_in_aed) as revenue,
             COUNT(DISTINCT order_number) as orders
         FROM fact_orders
         WHERE {where_sql}
-        GROUP BY date_label
-        ORDER BY date_label ASC
+        GROUP BY 1
+        ORDER BY 1 ASC
     """
     
     print(f"🔍 Executing Enhanced Trend Query (granularity={granularity}) with filters: {filters.model_dump()}")
@@ -446,13 +472,13 @@ def get_leaderboard(
         trend_query = f"""
             SELECT
                 {db_col} as label,
-                strftime('%Y-%m', order_date) as month,
+                {_sql_date_label_expr("order_date", "month")} as month,
                 SUM(order_price_in_aed) as monthly_revenue
             FROM fact_orders
-            WHERE order_date >= date('now', '-6 months')
+            WHERE order_date >= {_sql_cutoff_from_max_date("order_date", months=6)}
               AND {db_col} IN ({','.join(entity_placeholders)})
-            GROUP BY label, month
-            ORDER BY label, month ASC
+            GROUP BY 1, 2
+            ORDER BY 1, 2 ASC
         """
 
         trend_df = get_data(trend_query, params)
@@ -990,12 +1016,13 @@ def get_sparkline_data(metric: str, days: int = 30):
     
     # Get the most recent date in the database and work backwards from there
     # This handles cases where data is historical (e.g., June 2025 only)
+    cutoff_expr = _sql_cutoff_from_max_date("order_date", days=days)
     query = f"""
         SELECT 
             order_date as date,
             {agg_expr} as value
         FROM fact_orders
-        WHERE order_date >= (SELECT date(MAX(order_date), '-{days} days') FROM fact_orders)
+        WHERE order_date >= {cutoff_expr}
         GROUP BY order_date
         ORDER BY order_date
     """

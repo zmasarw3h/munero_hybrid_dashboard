@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { X, AlertCircle, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useFilters } from '@/components/dashboard/FilterContext';
+import { useFilters, transformFiltersForAPI } from '@/components/dashboard/FilterContext';
 import { apiClient } from '@/lib/api-client';
 import { ChatMessage as ChatMessageType, ChatRequest } from '@/lib/types';
 import { ChatInput } from './ChatInput';
@@ -19,22 +19,23 @@ export function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     const { filters } = useFilters();
     const [messages, setMessages] = useState<ChatMessageType[]>([]);
     const [isLoading, setIsLoading] = useState(false);
-    const [ollamaWarning, setOllamaWarning] = useState<string | null>(null);
+    const [aiWarning, setAiWarning] = useState<string | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
 
-    // Check Ollama health on mount
+    // Check AI chat health on mount
     useEffect(() => {
         const checkHealth = async () => {
             try {
                 const health = await apiClient.checkChatHealth();
-                if (health.status !== 'ok') {
-                    setOllamaWarning(health.message);
+                if (health.status !== 'healthy') {
+                    const hintText = health.hint ? ` ${health.hint}` : '';
+                    setAiWarning(`${health.message}${hintText}`.trim());
                 } else {
-                    setOllamaWarning(null);
+                    setAiWarning(null);
                 }
             } catch (error) {
-                setOllamaWarning('Unable to connect to AI service. Make sure the backend is running.');
+                setAiWarning('Unable to connect to AI service. Make sure the backend is running.');
             }
         };
 
@@ -59,17 +60,7 @@ export function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
 
     // Convert frontend filters to API format
     const getApiFilters = (): ChatRequest['filters'] => {
-        return {
-            date_range: {
-                start: filters.dateRange.start.toISOString().split('T')[0],
-                end: filters.dateRange.end.toISOString().split('T')[0],
-            },
-            countries: filters.countries.length > 0 ? filters.countries : undefined,
-            product_types: filters.productTypes.length > 0 ? filters.productTypes : undefined,
-            clients: filters.selectedClients.length > 0 ? filters.selectedClients : undefined,
-            brands: filters.selectedBrands.length > 0 ? filters.selectedBrands : undefined,
-            suppliers: filters.selectedSuppliers.length > 0 ? filters.selectedSuppliers : undefined,
-        };
+        return transformFiltersForAPI(filters);
     };
 
     const handleSend = async (message: string) => {
@@ -84,10 +75,11 @@ export function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
         setIsLoading(true);
 
         try {
+            const requestFilters = getApiFilters();
             // Call API with current filters
             const response = await apiClient.sendChatMessage({
                 message,
-                filters: getApiFilters(),
+                filters: requestFilters,
             });
 
             // Add assistant message
@@ -97,6 +89,7 @@ export function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
                 content: response.answer_text,
                 timestamp: new Date(),
                 response,
+                requestFilters,
             };
             setMessages((prev) => [...prev, assistantMessage]);
         } catch (error) {
@@ -191,11 +184,11 @@ export function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
                     </div>
                 </div>
 
-                {/* Ollama Warning */}
-                {ollamaWarning && (
+                {/* AI Warning */}
+                {aiWarning && (
                     <div className="bg-yellow-50 dark:bg-yellow-950/30 border-b border-yellow-200 dark:border-yellow-800 px-4 py-2 text-sm text-yellow-800 dark:text-yellow-200 flex items-start gap-2 shrink-0">
                         <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                        <span>{ollamaWarning}</span>
+                        <span>{aiWarning}</span>
                     </div>
                 )}
 

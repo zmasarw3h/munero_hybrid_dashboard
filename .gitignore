@@ -18,3 +18,8 @@ munero-platform/backend.nohup.out
 **/node_modules/
 **/.next/
 munero-platform/venv/
+
+# macOS
+.DS_Store
+**/.DS_Store
+.env

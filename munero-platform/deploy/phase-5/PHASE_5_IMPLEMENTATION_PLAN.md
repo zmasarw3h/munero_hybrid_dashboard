@@ -77,6 +77,8 @@ Pick one:
 
 ### C2) Place the seed DB (host file; not committed)
 
+- [ ] Ensure the target directory exists:
+  - [ ] `mkdir -p munero-platform/data`
 - [ ] Place the DB at: `munero-platform/data/munero.sqlite`
 - [ ] Confirm: `ls -lh munero-platform/data/munero.sqlite`
 
@@ -117,7 +119,8 @@ From `munero-platform/deploy/phase-4`:
 ### C6) Pull the Ollama model
 
 From `munero-platform/deploy/phase-4`:
-- [ ] `docker compose exec -T ollama ollama pull "$OLLAMA_MODEL"`
+- [ ] Pull the model defined in `./.env`:
+  - [ ] `MODEL="$(grep -E '^OLLAMA_MODEL=' .env | cut -d= -f2-)" && docker compose exec -T ollama ollama pull "$MODEL"`
 
 ---
 

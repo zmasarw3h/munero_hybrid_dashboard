@@ -1,0 +1,17 @@
+./.gitignore
+./PROJECT_STRUCTURE.txt
+./README.md
+./SETUP_COMPLETE.md
+./backend/.env.example
+./backend/app/__init__.py
+./backend/app/api/__init__.py
+./backend/app/core/__init__.py
+./backend/app/core/config.py
+./backend/app/models.py
+./backend/app/services/__init__.py
+./backend/main.py
+./backend/requirements.txt
+./data/munero.sqlite
+./scripts/ingest_data.py
+./scripts/setup.sh
+./scripts/start_backend.sh

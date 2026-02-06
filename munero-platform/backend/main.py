@@ -5,10 +5,11 @@ FastAPI application with health checks and CORS configuration.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
-import sqlite3
-import os
+from sqlalchemy import inspect, text
+from sqlalchemy.engine.url import make_url
 
 from app.core.config import settings
+from app.core.database import engine
 from app.models import HealthResponse
 from app.api import dashboard, chat, analyze
 
@@ -34,30 +35,38 @@ app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"]
 app.include_router(chat.router, prefix="/api/chat", tags=["AI Chat"])
 app.include_router(analyze.router, prefix="/api/analyze", tags=["Driver Analysis"])
 
+def _safe_db_url(db_uri: str) -> str:
+    try:
+        return make_url(db_uri).render_as_string(hide_password=True)
+    except Exception:
+        return "<invalid DB URI>"
+
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize resources on application startup"""
     print(f"🚀 Starting {settings.APP_NAME} v{settings.APP_VERSION}")
-    print(f"📊 Database: {settings.DB_FILE}")
-    print(f"🤖 LLM Model: {settings.OLLAMA_MODEL}")
-    print(f"🔗 Ollama URL: {settings.OLLAMA_BASE_URL}")
+    print(f"🗄️  DB dialect: {settings.db_dialect}")
+    print(f"🔗 DB URL: {_safe_db_url(settings.DB_URI)}")
+    print(f"🤖 LLM provider: {settings.LLM_PROVIDER}")
+    print(f"🤖 LLM model: {settings.LLM_MODEL}")
+    print(f"🔗 LLM base URL: {settings.LLM_BASE_URL}")
+    print(f"🔐 LLM key configured: {bool(settings.LLM_API_KEY)}")
     
-    # Verify database exists
-    if not os.path.exists(settings.DB_FILE):
-        print(f"⚠️  WARNING: Database file not found at {settings.DB_FILE}")
-        print("   Run: python scripts/ingest_data.py")
-    else:
-        # Test database connection
-        try:
-            conn = sqlite3.connect(settings.DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            tables = cursor.fetchall()
-            conn.close()
-            print(f"✅ Database connected: {len(tables)} tables found")
-        except Exception as e:
-            print(f"❌ Database connection error: {e}")
+    # Test database connectivity
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        print("✅ Database connected")
+    except Exception as e:
+        print(f"❌ Database connection error: {e}")
+
+    # Optional: Log table count (dialect-agnostic)
+    try:
+        tables = inspect(engine).get_table_names()
+        print(f"📚 Database tables: {len(tables)}")
+    except Exception as e:
+        print(f"⚠️  Table inspection failed: {e}")
 
 
 @app.on_event("shutdown")
@@ -74,24 +83,20 @@ async def health_check():
     Returns:
         - status: Application health status
         - timestamp: Current server time
-        - database_connected: Whether SQLite database is accessible
-        - llm_available: Whether Ollama LLM is reachable (placeholder for now)
+        - database_connected: Whether the configured database is accessible
+        - llm_available: Whether the configured LLM appears configured
     """
     # Check database connection
     db_connected = False
     try:
-        if os.path.exists(settings.DB_FILE):
-            conn = sqlite3.connect(settings.DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1")
-            cursor.fetchone()
-            conn.close()
-            db_connected = True
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_connected = True
     except Exception as e:
         print(f"Health check - DB error: {e}")
     
-    # TODO: Check Ollama availability (implement in next phase)
-    llm_available = True  # Placeholder
+    # Keep `/health` stable for hosting health checks: verify configuration only (no external API call).
+    llm_available = bool(settings.LLM_API_KEY)
     
     return HealthResponse(
         status="healthy" if db_connected else "degraded",

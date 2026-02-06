@@ -8,11 +8,15 @@ import os
 from pathlib import Path
 
 # CSV Source Paths
+# You can override the default directory by setting MUNERO_CSV_DIR.
+DEFAULT_CSV_DIR = "/Users/zmasarweh/Documents/Munero_CSV_Data"
+CSV_DIR = os.environ.get("MUNERO_CSV_DIR", DEFAULT_CSV_DIR)
+
 FILES = {
-    "dim_customer": "/Users/zmasarweh/Documents/Munero_CSV_Data/dim_customer_rows.csv",
-    "dim_products": "/Users/zmasarweh/Documents/Munero_CSV_Data/dim_products_rows.csv",
-    "dim_suppliers": "/Users/zmasarweh/Documents/Munero_CSV_Data/dim_suppliers_rows.csv",
-    "fact_orders": "/Users/zmasarweh/Documents/Munero_CSV_Data/fact_orders_rows_converted.csv"
+    "dim_customer": os.path.join(CSV_DIR, "dim_customer_rows.csv"),
+    "dim_products": os.path.join(CSV_DIR, "dim_products_rows.csv"),
+    "dim_suppliers": os.path.join(CSV_DIR, "dim_suppliers_rows.csv"),
+    "fact_orders": os.path.join(CSV_DIR, "fact_orders_rows_converted.csv"),
 }
 
 # Output database path

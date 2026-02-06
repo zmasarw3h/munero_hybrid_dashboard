@@ -40,7 +40,11 @@ export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
         if (!response?.sql_query) return;
         setIsExporting(true);
         try {
-            await apiClient.exportChatCSV(response.sql_query, `chat-export-${Date.now()}.csv`);
+            await apiClient.exportChatCSV(
+                response.sql_query,
+                message.requestFilters,
+                `chat-export-${Date.now()}.csv`
+            );
         } catch (err) {
             console.error('Failed to export CSV:', err);
         } finally {

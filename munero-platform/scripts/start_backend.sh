@@ -14,9 +14,13 @@ if [ ! -d "backend/venv" ]; then
 fi
 
 # Check if database exists
-if [ ! -f "data/munero.sqlite" ]; then
-    echo "❌ Database not found. Run ./scripts/setup.sh first"
-    exit 1
+if [ -z "${DATABASE_URL:-}" ] && [ -z "${DB_URI:-}" ]; then
+    if [ ! -f "data/munero.sqlite" ]; then
+        echo "❌ Database not found. Run ./scripts/setup.sh first"
+        exit 1
+    fi
+else
+    echo "🗄️  Detected DATABASE_URL/DB_URI; skipping local SQLite file check."
 fi
 
 # Start the server

@@ -361,7 +361,7 @@ class DriverAnalysisResponse(BaseModel):
 class MetaResponse(BaseModel):
     """Response model for data freshness and metadata endpoint"""
     last_updated: Optional[datetime] = None
-    data_source: str = "munero.sqlite"
+    data_source: str = "database"
     refresh_schedule: str = "Daily at 2:00 AM UTC"
     total_records: Optional[int] = None
 

@@ -8,14 +8,17 @@ import pandas as pd
 import httpx
 from typing import Tuple, Optional, Literal, cast, Dict, Any
 from datetime import date, timedelta
-from langchain_ollama import ChatOllama
+try:
+    from langchain_ollama import ChatOllama
+except Exception:  # pragma: no cover
+    ChatOllama = None  # type: ignore[assignment]
 from app.core.database import get_data
 from app.core.config import settings
 from app.models import DashboardFilters, ChartResponse, ChartPoint, AIAnalysisResponse
 
 # Configuration
-LLM_MODEL = settings.OLLAMA_MODEL
-BASE_URL = settings.OLLAMA_BASE_URL
+LLM_MODEL = getattr(settings, "OLLAMA_MODEL", "qwen2.5-coder:7b")
+BASE_URL = getattr(settings, "OLLAMA_BASE_URL", "http://localhost:11434")
 LLM_TEMPERATURE = settings.LLM_TEMPERATURE
 
 # Intent Detection Patterns
@@ -250,6 +253,8 @@ def get_llm():
     """
     Initialize and return ChatOllama instance.
     """
+    if ChatOllama is None:
+        raise RuntimeError("langchain-ollama is not installed; llm_engine is not available.")
     return ChatOllama(model=LLM_MODEL, base_url=BASE_URL, temperature=LLM_TEMPERATURE)
 
 
@@ -650,17 +655,21 @@ def _handle_data_query(question: str, filters: DashboardFilters) -> AIAnalysisRe
         
         filter_context = " | ".join(filter_context_parts) if filter_context_parts else "All data (no filters active)"
         
-        # Prepare data summary for the LLM
-        data_preview = df.head(5).to_markdown(index=False) if len(df) <= 5 else df.head(5).to_string(index=False)
-        
-        # Calculate key statistics for context
+        # Prepare a safe data overview for the LLM (no row-level previews)
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        stats_context = ""
+        overview_lines = [
+            f"Total Rows: {len(df)}",
+            f"Total Columns: {len(df.columns)}",
+            f"Columns: {', '.join(str(c) for c in df.columns)}",
+        ]
         if numeric_cols:
             main_metric = numeric_cols[0]
             total = df[main_metric].sum()
             avg = df[main_metric].mean()
-            stats_context = f"\nKey Stats: Total {main_metric} = {total:,.2f}, Average = {avg:,.2f}"
+            overview_lines.append(
+                f"Key Stats (for {main_metric}): Total = {total:,.2f}, Average = {avg:,.2f}"
+            )
+        data_overview = "\n".join(overview_lines)
         
         summary_prompt = f"""You are a business analyst for Munero, a B2B gift card and voucher platform.
 
@@ -671,10 +680,8 @@ ACTIVE DASHBOARD FILTERS: {filter_context}
 SQL QUERY EXECUTED:
 {sql_query}
 
-DATA RESULT (first 5 rows):
-{data_preview}
-
-Total Rows: {len(df)}{stats_context}
+DATA OVERVIEW (no row-level values):
+{data_overview}
 
 TASK: Provide a clear, actionable 2-3 sentence summary for an executive. Focus on:
 1. The key finding or pattern
