@@ -9,6 +9,9 @@ This document is a **self‑contained, end‑to‑end implementation plan** to m
 
 > Note: The repo previously assumed SQLite + local Ollama. Some parts of the backend are already Postgres‑ready, but there are still a few SQLite/Ollama assumptions to remove (listed below).
 
+For the latest migration status + what to do next, see:
+- `munero-platform/HOSTED_MIGRATION_HANDOFF_2026-02-07.md`
+
 ---
 
 ## TL;DR (happy path)

@@ -7,11 +7,10 @@ import re
 import pandas as pd
 from typing import Optional, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from sqlalchemy import text
 
 from app.models import DashboardFilters
 from app.core.config import settings
-from app.core.database import engine
+from app.core.database import engine, execute_query_df
 from app.core.logging_utils import redact_sql_for_log
 from app.services.gemini_client import (
     GeminiClient,
@@ -514,9 +513,7 @@ SQL:"""
         sql_conn: Any = conn or engine
         
         def _execute():
-            # Use SQLAlchemy `text()` to ensure named params like `:start_date`
-            # compile correctly across dialects/DBAPIs.
-            return pd.read_sql_query(text(sql), sql_conn, params=params)
+            return execute_query_df(sql, conn=sql_conn, params=params)
         
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:

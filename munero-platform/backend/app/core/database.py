@@ -3,9 +3,10 @@ Database connection and query execution utilities.
 Provides a unified interface for executing SQL queries and returning DataFrames.
 """
 import logging
-from typing import Optional
+from typing import Optional, Any
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.engine import Engine, Connection
 import pandas as pd
 
 from app.core.config import settings
@@ -33,6 +34,35 @@ elif url.get_backend_name() == "postgresql":
 
 engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 
+def execute_query_df(
+    query: str,
+    *,
+    conn: Engine | Connection,
+    params: Optional[dict[str, Any]] = None,
+) -> pd.DataFrame:
+    """
+    Execute a SQL query using SQLAlchemy `Connection.execute()` and return a DataFrame.
+
+    We intentionally avoid `pandas.read_sql_query()` here. In hosted Postgres deployments
+    with psycopg, we've seen `pandas.read_sql_query()` send literal `:named` parameters
+    to Postgres (resulting in `syntax error at or near ":"`). Executing via SQLAlchemy
+    ensures the dialect compiles bind params correctly (e.g. `%(name)s` / `$1`).
+    """
+    stmt = text(query)
+    bound_params = params or {}
+
+    if isinstance(conn, Engine):
+        with conn.connect() as connection:
+            result = connection.execute(stmt, bound_params)
+            rows = result.fetchall()
+            columns = result.keys()
+    else:
+        result = conn.execute(stmt, bound_params)
+        rows = result.fetchall()
+        columns = result.keys()
+
+    return pd.DataFrame.from_records(rows, columns=columns)
+
 
 def get_data(query: str, params: Optional[dict] = None) -> pd.DataFrame:
     """
@@ -51,11 +81,7 @@ def get_data(query: str, params: Optional[dict] = None) -> pd.DataFrame:
         ...               params={"start": "2025-01-01"})
     """
     try:
-        # IMPORTANT: Wrap strings in SQLAlchemy `text()` so named binds like
-        # `:start_date` compile correctly for all DBAPIs (e.g. psycopg uses
-        # `%(start_date)s` / `$1`, while sqlite accepts `:start_date`).
-        stmt = text(query)
-        df = pd.read_sql_query(stmt, engine, params=params)
+        df = execute_query_df(query, conn=engine, params=params)
         if settings.DEBUG:
             logger.debug("✅ Query executed (rows=%s, sql=%s)", len(df), redact_sql_for_log(query))
         return df
