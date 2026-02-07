@@ -15,6 +15,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 import pandas as pd
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from pydantic import BaseModel
@@ -665,7 +666,7 @@ async def export_csv(request: ExportCSVRequest):
             raise HTTPException(status_code=400, detail="Unsafe SQL query.")
 
         # 5. Execute query
-        df = pd.read_sql_query(sql_query, engine, params=params or None)
+        df = pd.read_sql_query(text(sql_query), engine, params=params or None)
         
         # 6. Generate CSV content
         output = io.StringIO()

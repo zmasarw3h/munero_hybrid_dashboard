@@ -4,7 +4,7 @@ Provides a unified interface for executing SQL queries and returning DataFrames.
 """
 import logging
 from typing import Optional
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine.url import make_url
 import pandas as pd
 
@@ -51,8 +51,11 @@ def get_data(query: str, params: Optional[dict] = None) -> pd.DataFrame:
         ...               params={"start": "2025-01-01"})
     """
     try:
-        # pd.read_sql supports standard SQL parameter binding for security
-        df = pd.read_sql(query, engine, params=params)
+        # IMPORTANT: Wrap strings in SQLAlchemy `text()` so named binds like
+        # `:start_date` compile correctly for all DBAPIs (e.g. psycopg uses
+        # `%(start_date)s` / `$1`, while sqlite accepts `:start_date`).
+        stmt = text(query)
+        df = pd.read_sql_query(stmt, engine, params=params)
         if settings.DEBUG:
             logger.debug("✅ Query executed (rows=%s, sql=%s)", len(df), redact_sql_for_log(query))
         return df
