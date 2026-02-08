@@ -106,6 +106,11 @@ Render env var to set:
 - `CORS_ORIGINS` to include your Vercel domain(s) **and** localhost for dev, e.g.
   - `https://<your-vercel-domain>,http://localhost:3000`
   - or JSON list form: `["https://<your-vercel-domain>","http://localhost:3000"]`
+  - common gotchas: trailing slash (`https://x.vercel.app/`) or extra wrapping quotes in the env var value
+
+Helper script:
+
+- `munero-platform/scripts/check_cors_preflight.sh` (runs a curl `OPTIONS` probe and prints CORS headers)
 
 ---
 

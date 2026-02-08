@@ -19,7 +19,7 @@ class SQLSafetyError(ValueError):
     """Raised when a SQL string fails safety validation."""
 
 
-_STARTS_WITH_SELECT_OR_WITH: Final[re.Pattern[str]] = re.compile(r"^(SELECT|WITH)\\b", re.IGNORECASE)
+_STARTS_WITH_SELECT_OR_WITH: Final[re.Pattern[str]] = re.compile(r"^(SELECT|WITH)\b", re.IGNORECASE)
 
 _BANNED_KEYWORDS: Final[tuple[str, ...]] = (
     # DML
@@ -50,7 +50,7 @@ _BANNED_KEYWORDS: Final[tuple[str, ...]] = (
 )
 
 _BANNED_KEYWORDS_RE: Final[re.Pattern[str]] = re.compile(
-    r"\\b(?:" + "|".join(re.escape(k) for k in _BANNED_KEYWORDS) + r")\\b",
+    r"\b(?:" + "|".join(re.escape(k) for k in _BANNED_KEYWORDS) + r")\b",
     re.IGNORECASE,
 )
 
@@ -84,7 +84,7 @@ def validate_sql_safety(sql: str, *, banned_keywords: Iterable[str] = _BANNED_KE
         _BANNED_KEYWORDS_RE
         if banned_keywords is _BANNED_KEYWORDS
         else re.compile(
-            r"\\b(?:" + "|".join(re.escape(k) for k in banned_keywords) + r")\\b",
+            r"\b(?:" + "|".join(re.escape(k) for k in banned_keywords) + r")\b",
             re.IGNORECASE,
         )
     )
@@ -193,4 +193,3 @@ def _mask_comments_and_literals(sql: str) -> str:
         i += 1
 
     return "".join(out)
-

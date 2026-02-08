@@ -48,10 +48,16 @@ async def startup_event():
     print(f"🚀 Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     print(f"🗄️  DB dialect: {settings.db_dialect}")
     print(f"🔗 DB URL: {_safe_db_url(settings.DB_URI)}")
+    print(f"🌐 CORS origins: {settings.cors_origins_list}")
     print(f"🤖 LLM provider: {settings.LLM_PROVIDER}")
     print(f"🤖 LLM model: {settings.LLM_MODEL}")
     print(f"🔗 LLM base URL: {settings.LLM_BASE_URL}")
     print(f"🔐 LLM key configured: {bool(settings.LLM_API_KEY)}")
+
+    if not settings.DEBUG:
+        cors = settings.cors_origins_list
+        if cors and all(("localhost" in origin or "127.0.0.1" in origin) for origin in cors):
+            print("⚠️  CORS_ORIGINS appears localhost-only; hosted frontends will fail preflight (OPTIONS 400).")
     
     # Test database connectivity
     try:

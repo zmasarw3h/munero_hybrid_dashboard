@@ -156,7 +156,7 @@ export default function OverviewPage() {
                     <CardContent>
                         <p className="text-sm text-gray-600">{error}</p>
                         <p className="text-xs text-gray-500 mt-2">
-                            Make sure the backend is running on http://localhost:8000
+                            Make sure the backend is reachable and `NEXT_PUBLIC_API_URL` is set correctly.
                         </p>
                     </CardContent>
                 </Card>

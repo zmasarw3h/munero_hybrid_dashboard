@@ -308,6 +308,7 @@ async def chat_with_data(request: ChatRequest):
                 sql_len=len(sql_query) if sql_query else 0,
                 sql_sha=short_sha256(sql_query) if sql_query else None,
             )
+            logger.warning("🚫 [%s] Unsafe SQL blocked (reason=%s)", correlation_id, str(e))
             return ChatResponse(
                 answer_text="I couldn't generate a safe read-only query for your request. Please try rephrasing it.",
                 sql_query=None,

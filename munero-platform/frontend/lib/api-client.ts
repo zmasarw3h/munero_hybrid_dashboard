@@ -31,34 +31,90 @@ export class APIClient {
     private baseUrl: string;
 
     constructor(baseUrl: string = API_BASE_URL) {
-        this.baseUrl = baseUrl;
+        this.baseUrl = baseUrl.replace(/\/+$/, '');
+    }
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
         const url = `${this.baseUrl}${endpoint}`;
+        const method = (options?.method || 'GET').toUpperCase();
+        const headers = new Headers(options?.headers || {});
+
+        // Prefer not to send Content-Type on GETs to avoid unnecessary preflight.
+        if (!headers.has('Accept')) {
+            headers.set('Accept', 'application/json');
+        }
+        if (options?.body != null && !headers.has('Content-Type')) {
+            headers.set('Content-Type', 'application/json');
+        }
+
+        const requestInit: RequestInit = {
+            ...options,
+            method,
+            headers,
+        };
 
         try {
-            const response = await fetch(url, {
-                ...options,
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...options?.headers,
-                },
-            });
+            // Render free-tier services can sleep; the first request may fail
+            // with a transient network error while the service starts.
+            const maxAttempts = 8;
+            let lastError: unknown = null;
 
-            if (!response.ok) {
-                const error = await response.json().catch(() => ({}));
-                // Handle various error response formats
-                let message = `API Error: ${response.status}`;
-                if (typeof error === 'object' && error !== null) {
-                    message = error.detail || error.message || (Object.keys(error).length > 0 ? JSON.stringify(error) : message);
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                try {
+                    const response = await fetch(url, requestInit);
+
+                    if (!response.ok) {
+                        // During cold starts/proxy retries, platforms often return transient 429/5xx.
+                        const transientStatuses = new Set([429, 502, 503, 504]);
+                        const isLastAttempt = attempt >= maxAttempts - 1;
+                        if (!isLastAttempt && transientStatuses.has(response.status)) {
+                            const backoffMs = Math.min(1000 * Math.pow(2, attempt), 15000);
+                            await this.sleep(backoffMs);
+                            continue;
+                        }
+
+                        const error = await response.json().catch(() => ({}));
+                        // Handle various error response formats
+                        let message = `API Error: ${response.status}`;
+                        if (typeof error === 'object' && error !== null) {
+                            message =
+                                (error as any).detail ||
+                                (error as any).message ||
+                                (Object.keys(error).length > 0 ? JSON.stringify(error) : message);
+                        }
+                        throw new Error(message);
+                    }
+
+                    return response.json();
+                } catch (error) {
+                    lastError = error;
+                    const isLastAttempt = attempt >= maxAttempts - 1;
+                    const isNetworkError =
+                        error instanceof TypeError ||
+                        (error instanceof Error && /failed to fetch|networkerror/i.test(error.message));
+
+                    if (!isLastAttempt && isNetworkError) {
+                        // Backoff up to ~60s total (1 + 2 + 4 + 8 + 15 + 15 + 15)
+                        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 15000);
+                        await this.sleep(backoffMs);
+                        continue;
+                    }
+                    throw error;
                 }
-                throw new Error(message);
             }
 
-            return response.json();
+            throw lastError ?? new Error('API request failed.');
         } catch (error) {
             console.error(`API request failed: ${endpoint}`, error);
+            if (error instanceof TypeError || (error instanceof Error && /failed to fetch/i.test(error.message))) {
+                throw new Error(
+                    `Failed to reach backend at ${this.baseUrl}. If this is a Render free-tier service, it may be sleeping; wait ~30–60s and refresh.`
+                );
+            }
             throw error;
         }
     }

@@ -2,10 +2,12 @@
 Core configuration for Munero AI Platform backend.
 Centralized settings for database, LLM, and application behavior.
 """
+import ast
 import json
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Optional, List
+from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
@@ -84,19 +86,73 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> List[str]:
-        value = (self.CORS_ORIGINS or "").strip()
-        if not value:
+        raw_value = (self.CORS_ORIGINS or "").strip()
+        if not raw_value:
             return []
 
-        if value.startswith("["):
-            try:
-                parsed = json.loads(value)
-                if isinstance(parsed, list):
-                    return [str(origin).strip() for origin in parsed if str(origin).strip()]
-            except Exception:
-                pass
+        value = raw_value.strip()
+        # Some hosting dashboards wrap env var values in quotes; be tolerant.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1].strip()
 
-        return [origin.strip() for origin in value.split(",") if origin.strip()]
+        def _clean_origin(origin: object) -> str:
+            o = str(origin).strip()
+            if not o:
+                return ""
+
+            # Strip surrounding quotes repeatedly (common misconfiguration).
+            for _ in range(2):
+                if len(o) >= 2 and o[0] == o[-1] and o[0] in ("'", '"'):
+                    o = o[1:-1].strip()
+
+            # Origins never include trailing slashes; strip if present.
+            o = o.rstrip("/")
+
+            # If someone pasted a full URL (with path/query), normalize to origin.
+            if o.startswith(("http://", "https://")):
+                split = urlsplit(o)
+                if split.scheme and split.netloc:
+                    o = f"{split.scheme}://{split.netloc}"
+            return o
+
+        parsed_origins: list[str] | None = None
+
+        # Prefer list formats when provided.
+        if value.startswith("[") or value.startswith("("):
+            # 1) JSON list
+            try:
+                loaded = json.loads(value)
+            except Exception:
+                loaded = None
+
+            if isinstance(loaded, list):
+                parsed_origins = [_clean_origin(o) for o in loaded]
+            else:
+                # 2) Python/INI-style list, e.g. ['https://x','http://localhost:3000']
+                try:
+                    loaded = ast.literal_eval(value)
+                except Exception:
+                    loaded = None
+                if isinstance(loaded, (list, tuple, set)):
+                    parsed_origins = [_clean_origin(o) for o in loaded]
+
+        if parsed_origins is None:
+            # Comma/semicolon-separated
+            parts = value.replace(";", ",").split(",")
+            parsed_origins = [_clean_origin(p) for p in parts]
+
+        # Filter empties and dedupe (preserve order).
+        seen: set[str] = set()
+        origins: list[str] = []
+        for origin in parsed_origins:
+            if not origin:
+                continue
+            if origin in seen:
+                continue
+            seen.add(origin)
+            origins.append(origin)
+
+        return origins
 
     @property
     def db_dialect(self) -> str:

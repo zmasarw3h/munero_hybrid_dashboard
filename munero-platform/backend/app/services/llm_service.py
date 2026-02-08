@@ -329,14 +329,17 @@ CRITICAL SQL RULES:
 -------------------
 1. fact_orders is DENORMALIZED - NO JOINS needed for most queries!
 2. You MUST include: WHERE {FILTER_PLACEHOLDER_TOKEN} (exactly once)
-3. Dates in order_date are in YYYY-MM-DD format
-4. For monthly grouping: {month_grouping}
-5. For "Top N" queries: Use ORDER BY <metric> DESC LIMIT N
-6. Always use table alias if needed (e.g., fo for fact_orders)
-7. Round currency values: ROUND(SUM(order_price_in_aed), 2)
-8. Handle NULL COGS: COALESCE(cogs_in_aed, 0)
-9. End queries with semicolon
-10. NO markdown formatting in output - just raw SQL
+3. Return exactly ONE SQL statement (no extra semicolons)
+4. The statement MUST start with SELECT or WITH (read-only)
+5. NEVER use write/admin keywords: INSERT, UPDATE, DELETE, MERGE, CREATE, ALTER, DROP, TRUNCATE, GRANT, REVOKE, INTO, COPY, EXEC/EXECUTE, CALL, VACUUM, PRAGMA, ATTACH/DETACH
+6. Dates in order_date are in YYYY-MM-DD format
+7. For monthly grouping: {month_grouping}
+8. For "Top N" queries: Use ORDER BY <metric> DESC LIMIT N
+9. Always use table alias if needed (e.g., fo for fact_orders)
+10. Round currency values: ROUND(SUM(order_price_in_aed), 2)
+11. Handle NULL COGS: COALESCE(cogs_in_aed, 0)
+12. End queries with semicolon
+13. NO markdown formatting in output - just raw SQL
 
 EXAMPLE QUERIES:
 ----------------
