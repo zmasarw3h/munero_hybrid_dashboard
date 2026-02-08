@@ -108,6 +108,23 @@ def _log_exception(
         logger.debug("❌ [%s] traceback=%s", correlation_id, _redact_log_text(tb))
 
 
+def _extract_dbapi_details(exc: Exception) -> tuple[str | None, str | None, str | None]:
+    orig = getattr(exc, "orig", None)
+    if isinstance(orig, Exception):
+        orig_type = type(orig).__name__
+        orig_sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+        orig_message = str(orig)
+    else:
+        orig_type = None
+        orig_sqlstate = None
+        orig_message = None
+
+    if isinstance(orig_message, str) and len(orig_message) > 500:
+        orig_message = orig_message[:500] + "…"
+
+    return orig_type, orig_sqlstate, orig_message
+
+
 # ============================================================================
 # EXPORT CSV REQUEST MODEL
 # ============================================================================
@@ -343,7 +360,7 @@ async def chat_with_data(request: ChatRequest):
             )
             return ChatResponse(
                 answer_text="The query took too long to execute. Try narrowing your date range or adding filters.",
-                sql_query=None,
+                sql_query=sql_query,
                 data=None,
                 chart_config=None,
                 row_count=0,
@@ -362,24 +379,137 @@ async def chat_with_data(request: ChatRequest):
                 sql_len=len(sql_query) if sql_query else 0,
                 sql_sha=short_sha256(sql_query) if sql_query else None,
             )
-            error_msg = str(getattr(e, "orig", e))
-            # Provide helpful feedback for common errors
-            if "no such column" in error_msg.lower():
-                hint = "The query referenced a column that doesn't exist."
-            elif "no such table" in error_msg.lower():
-                hint = "The query referenced a table that doesn't exist."
-            else:
-                hint = "There was an issue with the generated query."
-            
-            return ChatResponse(
-                answer_text=f"I generated a query but it had an error. {hint} Please try rephrasing your question.",
-                sql_query=None,
-                data=None,
-                chart_config=None,
-                row_count=0,
-                warnings=[],
-                error="SQL execution failed."
+            dbapi_type, sqlstate, dbapi_message = _extract_dbapi_details(e)
+            logger.error(
+                "❌ [%s] SQL execution failed (dbapi_type=%s, sqlstate=%s, message=%s, sql=%s, params=%s)",
+                correlation_id,
+                dbapi_type,
+                sqlstate,
+                dbapi_message,
+                redact_sql_for_log(sql_query),
+                redact_params_for_log(sql_params or {}),
             )
+
+            error_msg = dbapi_message or str(getattr(e, "orig", e))
+            error_lower = error_msg.lower()
+
+            # Detect Postgres server-side statement timeout (distinct from our client-side TimeoutError)
+            if "statement timeout" in error_lower or "canceling statement due to statement timeout" in error_lower:
+                return ChatResponse(
+                    answer_text="The query took too long to execute. Try narrowing your date range or adding filters.",
+                    sql_query=sql_query,
+                    data=None,
+                    chart_config=None,
+                    row_count=0,
+                    warnings=["SQL query timed out"],
+                    error="Request timed out.",
+                )
+
+            repair_max = max(0, int(getattr(settings, "LLM_SQL_REPAIR_MAX_ATTEMPTS", 0) or 0))
+            repair_succeeded = False
+            if repair_max > 0:
+                for attempt in range(1, repair_max + 1):
+                    try:
+                        injected_predicate, _ = llm_service.build_filter_predicate(filters)
+                        repaired_template = llm_service.repair_sql_template(
+                            question=request.message,
+                            filters=filters,
+                            failed_sql_template=sql_template,
+                            injected_predicate=injected_predicate,
+                            db_error=(dbapi_message or "Database execution error"),
+                        )
+                        repaired_query, repaired_params = llm_service.inject_filters_into_sql(repaired_template, filters)
+                        validate_sql_safety(repaired_query)
+
+                        sql_query = repaired_query
+                        sql_params = repaired_params
+                        df = llm_service.execute_sql(repaired_query, params=repaired_params)
+                        row_count = len(df)
+                        warnings.append("Auto-repaired SQL after initial failure")
+                        logger.info(
+                            "✅ [%s] SQL auto-repair succeeded (attempt=%s, rows=%s, cols=%s)",
+                            correlation_id,
+                            attempt,
+                            row_count,
+                            len(df.columns),
+                        )
+                        repair_succeeded = True
+                        break
+                    except SQLSafetyError as repair_exc:
+                        _log_exception(
+                            correlation_id=correlation_id,
+                            label="SQL auto-repair blocked by safety",
+                            exc=repair_exc,
+                            prompt_text=prompt_text,
+                            sql_text=sql_query,
+                            prompt_len=prompt_len,
+                            prompt_sha=prompt_sha,
+                            sql_len=len(sql_query) if sql_query else 0,
+                            sql_sha=short_sha256(sql_query) if sql_query else None,
+                        )
+                        logger.warning(
+                            "🚫 [%s] SQL auto-repair blocked by safety (reason=%s)",
+                            correlation_id,
+                            str(repair_exc),
+                        )
+                        break
+                    except TimeoutError as repair_exc:
+                        _log_exception(
+                            correlation_id=correlation_id,
+                            label="SQL auto-repair timed out",
+                            exc=repair_exc,
+                            prompt_text=prompt_text,
+                            sql_text=sql_query,
+                            prompt_len=prompt_len,
+                            prompt_sha=prompt_sha,
+                            sql_len=len(sql_query) if sql_query else 0,
+                            sql_sha=short_sha256(sql_query) if sql_query else None,
+                        )
+                        break
+                    except Exception as repair_exc:
+                        _log_exception(
+                            correlation_id=correlation_id,
+                            label="SQL auto-repair attempt failed",
+                            exc=repair_exc,
+                            prompt_text=prompt_text,
+                            sql_text=sql_query,
+                            prompt_len=prompt_len,
+                            prompt_sha=prompt_sha,
+                            sql_len=len(sql_query) if sql_query else 0,
+                            sql_sha=short_sha256(sql_query) if sql_query else None,
+                        )
+                        logger.warning(
+                            "⚠️ [%s] SQL auto-repair attempt failed (attempt=%s, exc_type=%s)",
+                            correlation_id,
+                            attempt,
+                            type(repair_exc).__name__,
+                        )
+
+            if repair_succeeded:
+                # Proceed to Step 3 using the repaired SQL results.
+                pass
+            else:
+                # Provide helpful feedback for common errors
+                if "no such column" in error_lower or ("column" in error_lower and "does not exist" in error_lower):
+                    hint = "The query referenced a column that doesn't exist."
+                elif "no such table" in error_lower or ("relation" in error_lower and "does not exist" in error_lower):
+                    hint = "The query referenced a table that doesn't exist."
+                elif "operator does not exist" in error_lower or "function sum" in error_lower or "could not cast" in error_lower:
+                    hint = "There was a type mismatch in the query. Some numeric/date fields may be stored as text and require casting."
+                elif "syntax error" in error_lower:
+                    hint = "There was a syntax error in the generated SQL."
+                else:
+                    hint = "There was an issue with the generated query."
+
+                return ChatResponse(
+                    answer_text=f"I generated a query but it had an error. {hint} Please try rephrasing your question.",
+                    sql_query=sql_query,
+                    data=None,
+                    chart_config=None,
+                    row_count=0,
+                    warnings=warnings,
+                    error="SQL execution failed.",
+                )
         except Exception as e:
             _log_exception(
                 correlation_id=correlation_id,
@@ -394,7 +524,7 @@ async def chat_with_data(request: ChatRequest):
             )
             return ChatResponse(
                 answer_text="Something went wrong while running the query. Please try again.",
-                sql_query=None,
+                sql_query=sql_query,
                 data=None,
                 chart_config=None,
                 row_count=0,

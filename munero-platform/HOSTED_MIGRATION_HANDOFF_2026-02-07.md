@@ -44,8 +44,11 @@ Security principle: **no secrets in the frontend**. The only Vercel env var shou
   - `LLM_MODEL` (default `gemini-2.5-flash`)
   - `LLM_BASE_URL` (default `https://generativelanguage.googleapis.com/v1beta`)
   - `LLM_MAX_OUTPUT_TOKENS`, `LLM_RETRIES`, `LLM_TIMEOUT`, `SQL_TIMEOUT`
+  - `LLM_SQL_REPAIR_MAX_ATTEMPTS` (default `1`) — on SQL execution errors, asks the LLM to repair the SQL once and retries
 - Implemented minimal Gemini HTTP client (httpx) in `munero-platform/backend/app/services/gemini_client.py`.
 - Removed LangChain deps from `munero-platform/backend/requirements.txt` (hosted path uses `httpx`).
+
+**Model selection note**: If you still see frequent bad SQL after the Postgres-proofing fixes + auto-repair retry, try switching to a stronger model (if available in your Google project), e.g. `LLM_MODEL=gemini-2.5-pro`. Keep `gemini-2.5-flash` if reliability is good; it’s typically cheaper/faster.
 
 ### DB connection hardening
 

@@ -211,23 +211,36 @@ FOREIGN KEY RELATIONSHIPS (for reference - usually not needed due to denormaliza
         - Uses bound params (never quotes/concatenates values into SQL).
         - For PostgreSQL list filters uses `= ANY(CAST(:param AS text[]))`.
         """
-        predicate_parts: list[str] = ["is_test = 0"]
+        is_test_predicate = "is_test = 0"
+        order_date_expr = "order_date"
+        if settings.db_dialect == "postgresql":
+            # In hosted Supabase, ingested columns may be TEXT/BOOLEAN/INT. Make this predicate tolerant.
+            is_test_predicate = "COALESCE(NULLIF(lower(is_test::text), ''), '0') IN ('0','false','f')"
+            order_date_expr = "NULLIF(order_date::text, '')::date"
+
+        predicate_parts: list[str] = [is_test_predicate]
         params: dict[str, Any] = {}
 
         if filters is None:
             return " AND ".join(predicate_parts), params
 
+        def _bind_date(d) -> Any:
+            # Prefer date-typed binds for Postgres; fall back to strings for SQLite/other.
+            if settings.db_dialect == "postgresql":
+                return d
+            return str(d)
+
         # Date range filter
         if filters.start_date and filters.end_date:
-            predicate_parts.append("order_date BETWEEN :munero_start_date AND :munero_end_date")
-            params["munero_start_date"] = str(filters.start_date)
-            params["munero_end_date"] = str(filters.end_date)
+            predicate_parts.append(f"{order_date_expr} BETWEEN :munero_start_date AND :munero_end_date")
+            params["munero_start_date"] = _bind_date(filters.start_date)
+            params["munero_end_date"] = _bind_date(filters.end_date)
         elif filters.start_date:
-            predicate_parts.append("order_date >= :munero_start_date")
-            params["munero_start_date"] = str(filters.start_date)
+            predicate_parts.append(f"{order_date_expr} >= :munero_start_date")
+            params["munero_start_date"] = _bind_date(filters.start_date)
         elif filters.end_date:
-            predicate_parts.append("order_date <= :munero_end_date")
-            params["munero_end_date"] = str(filters.end_date)
+            predicate_parts.append(f"{order_date_expr} <= :munero_end_date")
+            params["munero_end_date"] = _bind_date(filters.end_date)
 
         def _add_list_filter(values: list[str], column: str, param_name: str) -> None:
             if not values:
@@ -290,8 +303,21 @@ FOREIGN KEY RELATIONSHIPS (for reference - usually not needed due to denormaliza
         filters_summary = self._build_active_filters_summary(filters)
 
         db_name = "PostgreSQL" if settings.db_dialect == "postgresql" else "SQLite"
+        order_date_expr = (
+            "NULLIF(order_date::text, '')::date"
+            if settings.db_dialect == "postgresql"
+            else "order_date"
+        )
+        numeric_expr_template = (
+            "NULLIF(regexp_replace({col}::text, '[^0-9.+-]', '', 'g'), '')::double precision"
+            if settings.db_dialect == "postgresql"
+            else "{col}"
+        )
+        revenue_expr = numeric_expr_template.format(col="order_price_in_aed")
+        cogs_expr = numeric_expr_template.format(col="cogs_in_aed")
+
         month_grouping = (
-            "to_char(order_date::date, 'YYYY-MM')" if settings.db_dialect == "postgresql"
+            f"to_char({order_date_expr}, 'YYYY-MM')" if settings.db_dialect == "postgresql"
             else "strftime('%Y-%m', order_date)"
         )
 
@@ -318,12 +344,12 @@ TERMINOLOGY MAPPING (Critical - use these definitions):
 - "product category" or "type" → fact_orders.order_type
 - "supplier" → fact_orders.supplier_name
 - "brand" → fact_orders.product_brand
-- "revenue" or "sales" → SUM(order_price_in_aed)
-- "profit" or "gross profit" → SUM(order_price_in_aed - cogs_in_aed)
-- "margin" or "profit margin" → (SUM(order_price_in_aed) - SUM(cogs_in_aed)) / SUM(order_price_in_aed) * 100
+- "revenue" or "sales" → SUM({revenue_expr})
+- "profit" or "gross profit" → SUM({revenue_expr}) - SUM(COALESCE({cogs_expr}, 0))
+- "margin" or "profit margin" → (SUM({revenue_expr}) - SUM(COALESCE({cogs_expr}, 0))) / NULLIF(SUM({revenue_expr}), 0) * 100
 - "orders" or "order count" → COUNT(DISTINCT order_number)
 - "quantity sold" → SUM(quantity)
-- "AOV" or "average order value" → SUM(order_price_in_aed) / COUNT(DISTINCT order_number)
+- "AOV" or "average order value" → SUM({revenue_expr}) / NULLIF(COUNT(DISTINCT order_number), 0)
 
 CRITICAL SQL RULES:
 -------------------
@@ -336,15 +362,15 @@ CRITICAL SQL RULES:
 7. For monthly grouping: {month_grouping}
 8. For "Top N" queries: Use ORDER BY <metric> DESC LIMIT N
 9. Always use table alias if needed (e.g., fo for fact_orders)
-10. Round currency values: ROUND(SUM(order_price_in_aed), 2)
-11. Handle NULL COGS: COALESCE(cogs_in_aed, 0)
+10. Round currency values: ROUND(SUM({revenue_expr}), 2)
+11. Handle NULL COGS: COALESCE({cogs_expr}, 0)
 12. End queries with semicolon
 13. NO markdown formatting in output - just raw SQL
 
 EXAMPLE QUERIES:
 ----------------
 Q: "What are my top 5 products by revenue?"
-A: SELECT product_name, ROUND(SUM(order_price_in_aed), 2) as total_revenue 
+A: SELECT product_name, ROUND(SUM({revenue_expr}), 2) as total_revenue 
    FROM fact_orders 
    WHERE {FILTER_PLACEHOLDER_TOKEN}
    GROUP BY product_name 
@@ -352,14 +378,14 @@ A: SELECT product_name, ROUND(SUM(order_price_in_aed), 2) as total_revenue
    LIMIT 5;
 
 Q: "Show monthly revenue trend"
-A: SELECT {month_grouping} as month, ROUND(SUM(order_price_in_aed), 2) as revenue 
+A: SELECT {month_grouping} as month, ROUND(SUM({revenue_expr}), 2) as revenue 
    FROM fact_orders 
    WHERE {FILTER_PLACEHOLDER_TOKEN}
    GROUP BY month 
    ORDER BY month;
 
 Q: "What is total revenue?"
-A: SELECT ROUND(SUM(order_price_in_aed), 2) as total_revenue 
+A: SELECT ROUND(SUM({revenue_expr}), 2) as total_revenue 
    FROM fact_orders 
    WHERE {FILTER_PLACEHOLDER_TOKEN};
 
@@ -490,6 +516,97 @@ SQL:"""
         if not sql_query or not sql_query.upper().strip().startswith(('SELECT', 'WITH')):
             raise Exception(f"Invalid SQL generated ({redact_sql_for_log(sql_query)})")
         
+        return sql_query
+
+    def repair_sql_template(
+        self,
+        *,
+        question: str,
+        filters: Optional[DashboardFilters],
+        failed_sql_template: str,
+        injected_predicate: str,
+        db_error: str,
+    ) -> str:
+        """
+        Attempt to repair a failed SQL *template* (must still contain the filter placeholder token).
+
+        This is used when the initial SQL executes unsuccessfully in hosted Postgres. The repair
+        prompt includes the DB error message and the injected predicate (without literal values).
+        """
+        schema_info = self.get_database_schema()
+        filters_summary = self._build_active_filters_summary(filters)
+        db_name = "PostgreSQL" if settings.db_dialect == "postgresql" else "SQLite"
+
+        order_date_expr = (
+            "NULLIF(order_date::text, '')::date"
+            if settings.db_dialect == "postgresql"
+            else "order_date"
+        )
+        numeric_expr_template = (
+            "NULLIF(regexp_replace({col}::text, '[^0-9.+-]', '', 'g'), '')::double precision"
+            if settings.db_dialect == "postgresql"
+            else "{col}"
+        )
+        revenue_expr = numeric_expr_template.format(col="order_price_in_aed")
+        cogs_expr = numeric_expr_template.format(col="cogs_in_aed")
+        month_grouping = (
+            f"to_char({order_date_expr}, 'YYYY-MM')" if settings.db_dialect == "postgresql"
+            else "strftime('%Y-%m', order_date)"
+        )
+
+        prompt = f"""You are a {db_name} SQL expert for the 'Munero' sales analytics database.
+
+The previous SQL template failed when executed. Fix the SQL template so it executes successfully.
+
+{schema_info}
+
+ACTIVE FILTERS SUMMARY (do NOT include literal values):
+{filters_summary}
+
+FILTER INJECTION CONTRACT (REQUIRED):
+1) The backend will inject dashboard filter values server-side.
+2) Your SQL MUST include the token {FILTER_PLACEHOLDER_TOKEN} exactly once.
+3) Always include: WHERE {FILTER_PLACEHOLDER_TOKEN}
+4) If you need extra conditions, append them with AND after the token.
+
+HOSTED POSTGRES TYPE SAFETY (Important):
+- If numeric columns might be stored as text, coerce them safely, e.g.:
+  - revenue numeric expr: {revenue_expr}
+  - cogs numeric expr: {cogs_expr}
+- If order_date might be stored as text, cast safely:
+  - date expr: {order_date_expr}
+  - month grouping: {month_grouping}
+
+EXECUTION ERROR (from the database):
+{db_error}
+
+FAILED SQL TEMPLATE (contains {FILTER_PLACEHOLDER_TOKEN}):
+{failed_sql_template}
+
+INJECTED FILTER PREDICATE (backend replaces the token with this predicate):
+{injected_predicate}
+
+REPAIR RULES:
+1) Return exactly ONE SQL statement.
+2) The statement MUST start with SELECT or WITH (read-only).
+3) Do NOT use write/admin keywords: INSERT, UPDATE, DELETE, MERGE, CREATE, ALTER, DROP, TRUNCATE, GRANT, REVOKE, INTO, COPY, EXEC/EXECUTE, CALL, VACUUM, PRAGMA, ATTACH/DETACH.
+4) Preserve the filter token exactly once: WHERE {FILTER_PLACEHOLDER_TOKEN}
+5) Return ONLY the raw SQL (no markdown, no explanations).
+
+REPAIRED SQL TEMPLATE:"""
+
+        raw_response = self._invoke_llm_with_timeout(prompt)
+        sql_query = self.extract_sql_from_response(raw_response)
+
+        if not sql_query or not sql_query.upper().strip().startswith(("SELECT", "WITH")):
+            raise Exception(f"Invalid repaired SQL generated ({redact_sql_for_log(sql_query)})")
+
+        token_count = sql_query.count(FILTER_PLACEHOLDER_TOKEN)
+        if token_count != 1:
+            raise Exception(
+                f"Repaired SQL must include {FILTER_PLACEHOLDER_TOKEN} exactly once (found={token_count})"
+            )
+
         return sql_query
 
     def execute_sql(

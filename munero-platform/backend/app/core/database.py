@@ -34,6 +34,42 @@ elif url.get_backend_name() == "postgresql":
 
 engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 
+
+def _extract_dbapi_error(exc: Exception) -> Exception | None:
+    direct_orig = getattr(exc, "orig", None)
+    if isinstance(direct_orig, Exception):
+        return direct_orig
+
+    # pandas.errors.DatabaseError typically stores the wrapped exception in args[1]
+    args = getattr(exc, "args", ())
+    if isinstance(args, tuple) and len(args) >= 2 and isinstance(args[1], Exception):
+        nested = args[1]
+        nested_orig = getattr(nested, "orig", None)
+        if isinstance(nested_orig, Exception):
+            return nested_orig
+        return nested
+
+    # Fall back to exception chaining.
+    chained = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if isinstance(chained, Exception):
+        chained_orig = getattr(chained, "orig", None)
+        if isinstance(chained_orig, Exception):
+            return chained_orig
+        return chained
+
+    return None
+
+
+def _extract_dbapi_details(exc: Exception) -> tuple[str | None, str | None, str | None]:
+    orig = _extract_dbapi_error(exc)
+    orig_type = type(orig).__name__ if orig is not None else None
+    orig_sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None) if orig is not None else None
+    orig_message = (str(orig) if orig is not None else None) if orig is not None else None
+    if isinstance(orig_message, str) and len(orig_message) > 500:
+        orig_message = orig_message[:500] + "…"
+    return orig_type, orig_sqlstate, orig_message
+
+
 def execute_query_df(
     query: str,
     *,
@@ -51,15 +87,29 @@ def execute_query_df(
     stmt = text(query)
     bound_params = params or {}
 
-    if isinstance(conn, Engine):
-        with conn.connect() as connection:
-            result = connection.execute(stmt, bound_params)
+    try:
+        if isinstance(conn, Engine):
+            with conn.connect() as connection:
+                result = connection.execute(stmt, bound_params)
+                rows = result.fetchall()
+                columns = result.keys()
+        else:
+            result = conn.execute(stmt, bound_params)
             rows = result.fetchall()
             columns = result.keys()
-    else:
-        result = conn.execute(stmt, bound_params)
-        rows = result.fetchall()
-        columns = result.keys()
+    except Exception as e:
+        debug_log_sql = bool(settings.DEBUG and settings.DEBUG_LOG_PROMPTS)
+        orig_type, orig_sqlstate, orig_message = _extract_dbapi_details(e)
+        logger.error(
+            "❌ Query execution failed (exc_type=%s, dbapi_type=%s, sqlstate=%s, message=%s, sql=%s, params=%s)",
+            type(e).__name__,
+            orig_type,
+            orig_sqlstate,
+            orig_message,
+            redact_sql_for_log(query, include_prefix=debug_log_sql),
+            redact_params_for_log(bound_params),
+        )
+        raise
 
     return pd.DataFrame.from_records(rows, columns=columns)
 
@@ -86,37 +136,7 @@ def get_data(query: str, params: Optional[dict] = None) -> pd.DataFrame:
             logger.debug("✅ Query executed (rows=%s, sql=%s)", len(df), redact_sql_for_log(query))
         return df
     except Exception as e:
-        def _extract_dbapi_error(exc: Exception) -> Exception | None:
-            direct_orig = getattr(exc, "orig", None)
-            if isinstance(direct_orig, Exception):
-                return direct_orig
-
-            # pandas.errors.DatabaseError typically stores the wrapped exception in args[1]
-            args = getattr(exc, "args", ())
-            if isinstance(args, tuple) and len(args) >= 2 and isinstance(args[1], Exception):
-                nested = args[1]
-                nested_orig = getattr(nested, "orig", None)
-                if isinstance(nested_orig, Exception):
-                    return nested_orig
-                return nested
-
-            # Fall back to exception chaining.
-            chained = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
-            if isinstance(chained, Exception):
-                chained_orig = getattr(chained, "orig", None)
-                if isinstance(chained_orig, Exception):
-                    return chained_orig
-                return chained
-
-            return None
-
-        orig = _extract_dbapi_error(e)
-        orig_type = type(orig).__name__ if orig is not None else None
-        orig_sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None) if orig is not None else None
-        orig_message = (str(orig) if orig is not None else None) if orig is not None else None
-        if isinstance(orig_message, str) and len(orig_message) > 500:
-            orig_message = orig_message[:500] + "…"
-
+        orig_type, orig_sqlstate, orig_message = _extract_dbapi_details(e)
         debug_log_prompts = bool(settings.DEBUG and settings.DEBUG_LOG_PROMPTS)
         logger.error(
             "❌ Database error (exc_type=%s, dbapi_type=%s, sqlstate=%s, message=%s, sql=%s, params=%s)",
