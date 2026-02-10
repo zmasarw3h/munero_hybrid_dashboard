@@ -328,6 +328,7 @@ export interface ChatChartConfig {
 export interface ChatResponse {
     answer_text: string;
     sql_query?: string;
+    export_token?: string;
     data?: Record<string, unknown>[];
     chart_config?: ChatChartConfig;
     row_count: number;

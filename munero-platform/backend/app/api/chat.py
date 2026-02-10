@@ -35,6 +35,7 @@ from app.core.logging_utils import (
     redact_sql_for_log,
     short_sha256,
 )
+from app.core.export_tokens import ExportTokenError, make_export_token, verify_export_token
 from app.core.database import engine, execute_query_df
 
 
@@ -133,6 +134,7 @@ class ExportCSVRequest(BaseModel):
     """Request model for CSV export endpoint."""
     sql_query: str
     filters: Optional[DashboardFilters] = None
+    export_token: Optional[str] = None
     filename: Optional[str] = "export.csv"
 
 # Initialize services (singleton-like pattern)
@@ -157,7 +159,7 @@ def get_smart_render_service() -> SmartRenderService:
 
 
 @router.post("/", response_model=ChatResponse)
-async def chat_with_data(request: ChatRequest):
+def chat_with_data(request: ChatRequest):
     """
     AI-powered natural language data analysis.
     
@@ -346,6 +348,8 @@ async def chat_with_data(request: ChatRequest):
             df = llm_service.execute_sql(sql_query, params=sql_params)
             row_count = len(df)
             logger.info("✅ [%s] SQL executed (rows=%s, cols=%s)", correlation_id, row_count, len(df.columns))
+            if getattr(df, "attrs", {}).get("truncated"):
+                warnings.append(f"Results truncated to {settings.MAX_DISPLAY_ROWS} rows")
         except TimeoutError as e:
             _log_exception(
                 correlation_id=correlation_id,
@@ -426,6 +430,8 @@ async def chat_with_data(request: ChatRequest):
                         df = llm_service.execute_sql(repaired_query, params=repaired_params)
                         row_count = len(df)
                         warnings.append("Auto-repaired SQL after initial failure")
+                        if getattr(df, "attrs", {}).get("truncated"):
+                            warnings.append(f"Results truncated to {settings.MAX_DISPLAY_ROWS} rows")
                         logger.info(
                             "✅ [%s] SQL auto-repair succeeded (attempt=%s, rows=%s, cols=%s)",
                             correlation_id,
@@ -494,8 +500,22 @@ async def chat_with_data(request: ChatRequest):
                     hint = "The query referenced a column that doesn't exist."
                 elif "no such table" in error_lower or ("relation" in error_lower and "does not exist" in error_lower):
                     hint = "The query referenced a table that doesn't exist."
-                elif "operator does not exist" in error_lower or "function sum" in error_lower or "could not cast" in error_lower:
-                    hint = "There was a type mismatch in the query. Some numeric/date fields may be stored as text and require casting."
+                elif (
+                    "function round" in error_lower and "double precision" in error_lower
+                ) or "round(double precision, integer)" in error_lower:
+                    hint = (
+                        "Postgres requires numeric for ROUND(x, 2). Cast the SUM to numeric, e.g. "
+                        "ROUND(SUM(...)::numeric, 2)."
+                    )
+                elif (
+                    "operator does not exist" in error_lower
+                    or "function sum" in error_lower
+                    or "could not cast" in error_lower
+                ):
+                    hint = (
+                        "There was a type mismatch in the query. Some numeric/date fields may be stored as text "
+                        "and require casting."
+                    )
                 elif "syntax error" in error_lower:
                     hint = "There was a syntax error in the generated SQL."
                 else:
@@ -580,10 +600,28 @@ async def chat_with_data(request: ChatRequest):
         # =====================================================================
         elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
         logger.info("✅ [%s] chat completed in %sms", correlation_id, round(elapsed_ms, 0))
+
+        export_token: str | None = None
+        signing_secret = (settings.EXPORT_SIGNING_SECRET or "").strip()
+        if signing_secret:
+            try:
+                export_token = make_export_token(
+                    secret=signing_secret,
+                    sql_query=sql_query,
+                    filters=filters.model_dump(mode="json"),
+                    ttl_s=int(settings.EXPORT_TOKEN_TTL_S),
+                )
+            except Exception as token_exc:
+                logger.warning(
+                    "⚠️ [%s] Failed to generate export token (exc_type=%s)",
+                    correlation_id,
+                    type(token_exc).__name__,
+                )
         
         return ChatResponse(
             answer_text=answer_text,
             sql_query=sql_query,
+            export_token=export_token,
             data=data_list,
             chart_config=chart_config,
             row_count=row_count,
@@ -715,7 +753,7 @@ def test_chat():
 
 
 @router.post("/export-csv")
-async def export_csv(request: ExportCSVRequest):
+def export_csv(request: ExportCSVRequest):
     """
     Export SQL query results as CSV.
     
@@ -739,6 +777,7 @@ async def export_csv(request: ExportCSVRequest):
         filters = request.filters or DashboardFilters()
         debug_enabled = bool(settings.DEBUG)
         debug_log_prompts = bool(settings.DEBUG and settings.DEBUG_LOG_PROMPTS)
+        signing_secret = (settings.EXPORT_SIGNING_SECRET or "").strip()
 
         logger.info(
             "📤 Export CSV request received (id=%s, sql=%s)",
@@ -754,6 +793,31 @@ async def export_csv(request: ExportCSVRequest):
                     redact_sql_for_log(request.sql_query, include_prefix=True),
                 )
 
+        if not signing_secret:
+            if not settings.DEBUG:
+                raise HTTPException(
+                    status_code=503,
+                    detail="CSV export is not configured.",
+                )
+        else:
+            try:
+                verify_export_token(
+                    secret=signing_secret,
+                    token=request.export_token or "",
+                    sql_query=request.sql_query,
+                    filters=filters.model_dump(mode="json"),
+                )
+            except ExportTokenError as token_exc:
+                logger.warning(
+                    "🚫 Export CSV rejected (id=%s, reason=%s)",
+                    correlation_id,
+                    str(token_exc),
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail="Unauthorized export request.",
+                )
+
         # 1. Remove existing LIMIT clause
         sql_query = re.sub(r'\bLIMIT\s+\d+\b', '', request.sql_query, flags=re.IGNORECASE)
         sql_query = sql_query.strip().rstrip(';')
@@ -761,7 +825,10 @@ async def export_csv(request: ExportCSVRequest):
         # 2. Ensure we have params for the injected placeholders
         placeholder_count = sql_query.count(FILTER_PLACEHOLDER_TOKEN)
         if placeholder_count == 1:
-            sql_query, params = llm_service.inject_filters_into_sql(sql_query, filters)
+            try:
+                sql_query, params = llm_service.inject_filters_into_sql(sql_query, filters)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         elif placeholder_count > 1:
             raise HTTPException(
                 status_code=400,
@@ -796,7 +863,7 @@ async def export_csv(request: ExportCSVRequest):
             raise HTTPException(status_code=400, detail="Unsafe SQL query.")
 
         # 5. Execute query
-        df = execute_query_df(sql_query, conn=engine, params=params or None)
+        df = execute_query_df(sql_query, conn=engine, params=params or None, max_rows=10000)
         
         # 6. Generate CSV content
         output = io.StringIO()

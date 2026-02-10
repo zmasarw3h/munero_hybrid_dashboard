@@ -31,6 +31,13 @@ class GeminiClientConfig:
 class GeminiClient:
     def __init__(self, config: GeminiClientConfig):
         self._config = config
+        self._client = httpx.Client(timeout=self._config.timeout_s)
+
+    def close(self) -> None:
+        try:
+            self._client.close()
+        except Exception:
+            pass
 
     def _build_url(self) -> str:
         base = self._config.base_url.rstrip("/")
@@ -82,8 +89,7 @@ class GeminiClient:
 
         for attempt in range(attempts):
             try:
-                with httpx.Client(timeout=self._config.timeout_s) as client:
-                    response = client.post(url, headers=headers, json=body)
+                response = self._client.post(url, headers=headers, json=body)
 
                 status = response.status_code
                 if status in (429, 500, 502, 503, 504) and attempt < attempts - 1:
@@ -138,4 +144,3 @@ def can_check_gemini_connection(
         return 200 <= response.status_code < 300
     except Exception:
         return False
-

@@ -309,13 +309,14 @@ export class APIClient {
      * Export chat query results as CSV
      * Downloads full results (up to 10,000 rows) without LIMIT constraint
      */
-    async exportChatCSV(sqlQuery: string, filters?: DashboardFilters, filename?: string): Promise<void> {
+    async exportChatCSV(sqlQuery: string, filters?: DashboardFilters, filename?: string, exportToken?: string): Promise<void> {
         const response = await fetch(`${this.baseUrl}/api/chat/export-csv`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 sql_query: sqlQuery,
                 filters,
+                export_token: exportToken,
                 filename: filename || 'chat-export.csv'
             }),
         });

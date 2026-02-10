@@ -75,6 +75,7 @@ def execute_query_df(
     *,
     conn: Engine | Connection,
     params: Optional[dict[str, Any]] = None,
+    max_rows: int | None = None,
 ) -> pd.DataFrame:
     """
     Execute a SQL query using SQLAlchemy `Connection.execute()` and return a DataFrame.
@@ -91,11 +92,27 @@ def execute_query_df(
         if isinstance(conn, Engine):
             with conn.connect() as connection:
                 result = connection.execute(stmt, bound_params)
-                rows = result.fetchall()
+                if max_rows is None:
+                    rows = result.fetchall()
+                    truncated = False
+                else:
+                    limit = max(0, int(max_rows))
+                    rows = result.fetchmany(limit + 1)
+                    truncated = len(rows) > limit
+                    if truncated:
+                        rows = rows[:limit]
                 columns = result.keys()
         else:
             result = conn.execute(stmt, bound_params)
-            rows = result.fetchall()
+            if max_rows is None:
+                rows = result.fetchall()
+                truncated = False
+            else:
+                limit = max(0, int(max_rows))
+                rows = result.fetchmany(limit + 1)
+                truncated = len(rows) > limit
+                if truncated:
+                    rows = rows[:limit]
             columns = result.keys()
     except Exception as e:
         debug_log_sql = bool(settings.DEBUG and settings.DEBUG_LOG_PROMPTS)
@@ -111,7 +128,11 @@ def execute_query_df(
         )
         raise
 
-    return pd.DataFrame.from_records(rows, columns=columns)
+    df = pd.DataFrame.from_records(rows, columns=columns)
+    if truncated:
+        df.attrs["truncated"] = True
+        df.attrs["max_rows"] = int(max_rows) if max_rows is not None else None
+    return df
 
 
 def get_data(query: str, params: Optional[dict] = None) -> pd.DataFrame:
@@ -147,8 +168,9 @@ def get_data(query: str, params: Optional[dict] = None) -> pd.DataFrame:
             redact_sql_for_log(query, include_prefix=debug_log_prompts),
             redact_params_for_log(params or {}),
         )
-        # Return empty DF on error to prevent API crash
-        return pd.DataFrame()
+        if settings.DB_RETURN_EMPTY_ON_ERROR:
+            return pd.DataFrame()
+        raise
 
 
 def test_connection() -> bool:

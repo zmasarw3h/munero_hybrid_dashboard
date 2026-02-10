@@ -4,6 +4,7 @@ Provides KPI metrics and chart data for the dashboard frontend.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Literal, Optional
+import logging
 from app.models import (
     DashboardFilters, HeadlineStats, KPIMetric,
     ChartResponse, ChartPoint,
@@ -23,6 +24,7 @@ from app.models import (
 )
 from app.core.database import get_data
 from app.core.config import settings
+from app.core.logging_utils import redact_filter_values_for_log
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -30,6 +32,12 @@ import random
 import hashlib
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _log_filters_debug(label: str, filters: DashboardFilters) -> None:
+    if settings.DEBUG:
+        logger.debug("%s filters=%s", label, redact_filter_values_for_log(filters))
 
 def _sql_numeric_expr(column: str) -> str:
     """
@@ -213,12 +221,13 @@ def get_headline_stats(filters: DashboardFilters):
         WHERE {where_sql}
     """
     
-    print(f"🔍 Executing Headline KPI Query with filters: {filters.model_dump()}")
+    logger.info("🔍 Executing Headline KPI Query")
+    _log_filters_debug("🔍 Headline KPI Query", filters)
     df = get_data(query, params)
     
     if df.empty:
         # Return zeroed stats if no data
-        print("⚠️  No data found for the given filters - returning zero metrics")
+        logger.info("⚠️ No data found for the given filters - returning zero metrics")
         zero = KPIMetric(label="", value=0, formatted="0", trend_direction="neutral")
         return HeadlineStats(
             total_orders=KPIMetric(label="Total Orders", value=0, formatted="0", trend_direction="neutral"),
@@ -239,7 +248,14 @@ def get_headline_stats(filters: DashboardFilters):
     aov = total_rev / total_ord if total_ord > 0 else 0  # Average Order Value
     orders_per_client = total_ord / clients if clients > 0 else 0  # Orders per Client
 
-    print(f"✅ Headline KPIs calculated: Orders={total_ord}, Revenue={total_rev:.2f}, AOV={aov:.2f}, Orders/Client={orders_per_client:.2f}, Brands={brands}")
+    logger.info(
+        "✅ Headline KPIs calculated (orders=%s, revenue=%s, aov=%s, orders_per_client=%s, brands=%s)",
+        total_ord,
+        round(float(total_rev), 2),
+        round(float(aov), 2),
+        round(float(orders_per_client), 2),
+        brands,
+    )
 
     return HeadlineStats(
         total_orders=KPIMetric(
@@ -352,11 +368,12 @@ def get_sales_trend(filters: DashboardFilters, granularity: Literal['day', 'mont
         ORDER BY 1 ASC
     """
     
-    print(f"🔍 Executing Enhanced Trend Query (granularity={granularity}) with filters: {filters.model_dump()}")
+    logger.info("🔍 Executing Enhanced Trend Query (granularity=%s)", granularity)
+    _log_filters_debug("🔍 Enhanced Trend Query", filters)
     df = get_data(query, params)
     
     if df.empty:
-        print("⚠️  No trend data found for the given filters")
+        logger.info("⚠️ No trend data found for the given filters")
         return TrendResponse(title=f"Sales & Volume Trend ({granularity.title()})", data=[])
 
     # 2. Calculate Growth (Period over Period)
@@ -379,7 +396,12 @@ def get_sales_trend(filters: DashboardFilters, granularity: Literal['day', 'mont
     # Count anomalies for logging
     revenue_anomalies = df['is_revenue_anomaly'].sum()
     order_anomalies = df['is_order_anomaly'].sum()
-    print(f"✅ Trend Analysis: {len(df)} data points | Revenue anomalies: {revenue_anomalies} | Order anomalies: {order_anomalies}")
+    logger.info(
+        "✅ Trend Analysis (points=%s, revenue_anomalies=%s, order_anomalies=%s)",
+        len(df),
+        int(revenue_anomalies),
+        int(order_anomalies),
+    )
 
     # 4. Map to Response Model
     data_points = []
@@ -468,11 +490,17 @@ def get_leaderboard(
         LIMIT 50
     """
 
-    print(f"🔍 Executing Leaderboard Query (dimension={dimension}, include_trend={include_trend}, include_growth={include_growth}) with filters: {filters.model_dump()}")
+    logger.info(
+        "🔍 Executing Leaderboard Query (dimension=%s, include_trend=%s, include_growth=%s)",
+        dimension,
+        include_trend,
+        include_growth,
+    )
+    _log_filters_debug("🔍 Leaderboard Query", filters)
     df = get_data(query, params)
 
     if df.empty:
-        print("⚠️  No leaderboard data found for the given filters")
+        logger.info("⚠️ No leaderboard data found for the given filters")
         return LeaderboardResponse(title=f"Top {dimension.title()}s", dimension=dimension, data=[])
 
     # 3. Process Metrics in Pandas
@@ -486,7 +514,12 @@ def get_leaderboard(
     df['gross_profit'] = df['revenue'] - df['total_cogs']
     df['margin_pct'] = (df['gross_profit'] / df['revenue'] * 100).round(2)
 
-    print(f"✅ Leaderboard: {len(df)} {dimension}s analyzed | Total Revenue={total_view_revenue:,.2f}")
+    logger.info(
+        "✅ Leaderboard analyzed (dimension=%s, rows=%s, total_revenue=%s)",
+        dimension,
+        len(df),
+        round(float(total_view_revenue), 2),
+    )
 
     # 4. Fetch Trend Data (if requested)
     trend_data = {}
@@ -526,7 +559,11 @@ def get_leaderboard(
                 # Build trend array with 0 for missing months
                 trend_data[entity] = [float(month_values.get(m, 0)) for m in all_months]
 
-            print(f"📈 Trend data fetched: {len(trend_data)} entities with {len(all_months)} months")
+            logger.info(
+                "📈 Trend data fetched (entities=%s, months=%s)",
+                len(trend_data),
+                len(all_months),
+            )
 
     # 5. Calculate Growth Data (if requested and dimension is 'product')
     growth_data = {}
@@ -579,7 +616,7 @@ def get_leaderboard(
             for _, row in growth_df.iterrows():
                 if row['growth_pct'] is not None:
                     growth_data[row['product_name']] = round(float(row['growth_pct']), 2)
-            print(f"📈 Growth data calculated for {len(growth_data)} products")
+            logger.info("📈 Growth data calculated (products=%s)", len(growth_data))
 
     # 6. Map to Response
     data_points = []
@@ -615,7 +652,14 @@ def get_leaderboard(
     if data_points:
         top_entity = data_points[0]
         avg_margin = sum(p.margin_pct for p in data_points if p.margin_pct is not None) / max(len([p for p in data_points if p.margin_pct is not None]), 1)
-        print(f"📊 Top {dimension}: {top_entity.label} | Revenue=AED {top_entity.revenue:,.2f} | Share={top_entity.share_pct:.1f}% | Avg Margin={avg_margin:.1f}%")
+        logger.info(
+            "📊 Top entity (dimension=%s, label=%s, revenue=%s, share_pct=%s, avg_margin=%s)",
+            dimension,
+            top_entity.label,
+            round(float(top_entity.revenue), 2),
+            round(float(top_entity.share_pct), 1),
+            round(float(avg_margin), 1),
+        )
 
     return LeaderboardResponse(
         title=f"Top {dimension.title()}s",
@@ -657,7 +701,8 @@ def get_top_products(filters: DashboardFilters, limit: int = 10):
         LIMIT {limit}
     """
     
-    print(f"🔍 Executing Top Products Query (limit={limit}) with filters: {filters.model_dump()}")
+    logger.info("🔍 Executing Top Products Query (limit=%s)", limit)
+    _log_filters_debug("🔍 Top Products Query", filters)
     df = get_data(query, params)
     
     data_points = []
@@ -669,9 +714,9 @@ def get_top_products(filters: DashboardFilters, limit: int = 10):
             ) 
             for _, row in df.iterrows()
         ]
-        print(f"✅ Top Products: {len(data_points)} products returned")
+        logger.info("✅ Top Products returned (count=%s)", len(data_points))
     else:
-        print("⚠️  No product data found for the given filters")
+        logger.info("⚠️ No product data found for the given filters")
 
     return ChartResponse(
         title=f"Top {limit} Products by Revenue",
@@ -727,11 +772,12 @@ def get_client_scatter(filters: DashboardFilters):
         GROUP BY client_name, order_type
     """
     
-    print(f"🔍 Executing Client Scatter Query with filters: {filters.model_dump()}")
+    logger.info("🔍 Executing Client Scatter Query")
+    _log_filters_debug("🔍 Client Scatter Query", filters)
     raw_df = get_data(query, params)
     
     if raw_df.empty:
-        print("⚠️  No client data found for the given filters")
+        logger.info("⚠️ No client data found for the given filters")
         return ScatterResponse(data=[])
 
     # 2. Process in Pandas to find Totals + Dominant Type
@@ -762,14 +808,22 @@ def get_client_scatter(filters: DashboardFilters):
     total_clients = len(final_df)
     median_orders = int(np.median(final_df['total_orders'].values)) if total_clients > 0 else 0
     median_revenue = float(np.median(final_df['total_revenue'].values)) if total_clients > 0 else 0.0
-    print(f"📊 Full Dataset Medians: {total_clients} clients, median_orders={median_orders}, median_revenue={median_revenue:.2f}")
+    logger.info(
+        "📊 Full dataset medians (clients=%s, median_orders=%s, median_revenue=%s)",
+        total_clients,
+        median_orders,
+        round(float(median_revenue), 2),
+    )
 
     # Limit to top 500 clients by revenue for performance (avoids rendering thousands of SVG elements)
     if total_clients > 500:
         final_df = final_df.nlargest(500, 'total_revenue')
-        print(f"✅ Client Scatter: Returning top 500 of {total_clients} clients (performance optimization)")
+        logger.info(
+            "✅ Client Scatter returning top 500 (total_clients=%s)",
+            total_clients,
+        )
     else:
-        print(f"✅ Client Scatter: {total_clients} clients analyzed")
+        logger.info("✅ Client Scatter analyzed (clients=%s)", total_clients)
     
     # 3. Map to Response
     data_points = []
@@ -791,7 +845,16 @@ def get_client_scatter(filters: DashboardFilters):
     if data_points:
         avg_aov = sum(p.aov for p in data_points) / len(data_points)
         max_revenue_client = max(data_points, key=lambda p: p.total_revenue)
-        print(f"📊 Client Insights: Avg AOV={avg_aov:.2f}, Top Client={max_revenue_client.client_name} (AED {max_revenue_client.total_revenue:.2f})")
+        logger.info(
+            "📊 Client Insights calculated (avg_aov=%s, top_client_revenue=%s)",
+            round(float(avg_aov), 2),
+            round(float(max_revenue_client.total_revenue), 2),
+        )
+        if settings.DEBUG:
+            logger.debug(
+                "📊 Client Insights top_client=%s",
+                max_revenue_client.client_name,
+            )
 
     return ScatterResponse(
         data=data_points,
@@ -816,7 +879,7 @@ def get_filter_options():
     
     **Response**: Lists of unique string values for each dimension
     """
-    print("🔍 Fetching filter options from database")
+    logger.info("🔍 Fetching filter options from database")
     
     # Query 1: Get distinct clients
     clients_query = """
@@ -868,7 +931,14 @@ def get_filter_options():
     currencies_df = get_data(currencies_query)
     currencies = currencies_df['currency'].tolist() if not currencies_df.empty else []
     
-    print(f"✅ Filter options: {len(clients)} clients, {len(brands)} brands, {len(suppliers)} suppliers, {len(countries)} countries, {len(currencies)} currencies")
+    logger.info(
+        "✅ Filter options loaded (clients=%s, brands=%s, suppliers=%s, countries=%s, currencies=%s)",
+        len(clients),
+        len(brands),
+        len(suppliers),
+        len(countries),
+        len(currencies),
+    )
     
     return FilterOptionsResponse(
         clients=clients,
@@ -962,7 +1032,7 @@ def get_stuck_orders(limit: int = 10):
     }
     ```
     """
-    print(f"📋 Generating mock stuck orders (limit={limit})")
+    logger.info("📋 Generating mock stuck orders (limit=%s)", limit)
     
     # Generate realistic mock data
     mock_statuses: list[Literal['stuck', 'failed', 'pending']] = ['stuck', 'failed', 'pending']
@@ -1002,7 +1072,7 @@ def get_stuck_orders(limit: int = 10):
     # Sort by age descending (oldest first)
     orders.sort(key=lambda x: x.age_days, reverse=True)
     
-    print(f"✅ Generated {len(orders)} mock stuck orders")
+    logger.info("✅ Generated mock stuck orders (count=%s)", len(orders))
     
     return StuckOrdersResponse(
         total_count=len(orders),
@@ -1037,7 +1107,7 @@ def get_sparkline_data(metric: str, days: int = 30):
     if metric not in ['orders', 'revenue']:
         raise HTTPException(status_code=400, detail=f"Invalid metric '{metric}'. Must be 'orders' or 'revenue'")
     
-    print(f"📊 Fetching sparkline data for {metric} (last {days} days)")
+    logger.info("📊 Fetching sparkline data (metric=%s, days=%s)", metric, days)
     
     # Build aggregation expression based on metric
     if metric == "orders":
@@ -1062,7 +1132,7 @@ def get_sparkline_data(metric: str, days: int = 30):
     df = get_data(query)
     
     if df.empty:
-        print(f"⚠️ No sparkline data found for {metric}")
+        logger.info("⚠️ No sparkline data found (metric=%s)", metric)
         return SparklineResponse(metric=metric, data=[])
     
     data = [
@@ -1070,7 +1140,7 @@ def get_sparkline_data(metric: str, days: int = 30):
         for _, row in df.iterrows()
     ]
     
-    print(f"✅ Retrieved {len(data)} sparkline points for {metric}")
+    logger.info("✅ Retrieved sparkline points (metric=%s, count=%s)", metric, len(data))
     
     return SparklineResponse(metric=metric, data=data)
 
@@ -1098,7 +1168,8 @@ def get_geography_data(filters: DashboardFilters):
     """
     where_sql, params = build_where_clause(filters)
     
-    print(f"🌍 Fetching geography data with filters: {filters.model_dump()}")
+    logger.info("🌍 Fetching geography data")
+    _log_filters_debug("🌍 Geography Query", filters)
     
     query = f"""
         SELECT 
@@ -1116,7 +1187,7 @@ def get_geography_data(filters: DashboardFilters):
     df = get_data(query, params)
     
     if df.empty:
-        print("⚠️ No geography data found")
+        logger.info("⚠️ No geography data found")
         return GeographyResponse(data=[])
     
     data = []
@@ -1133,7 +1204,7 @@ def get_geography_data(filters: DashboardFilters):
             clients=int(row['clients'] or 0)
         ))
     
-    print(f"✅ Retrieved geography data for {len(data)} countries")
+    logger.info("✅ Retrieved geography data (countries=%s)", len(data))
     
     return GeographyResponse(data=data)
 
@@ -1174,7 +1245,8 @@ def get_top_products_by_status(filters: DashboardFilters, limit: int = 10):
     where_sql, params = build_where_clause(filters)
     params['limit'] = limit
     
-    print(f"📦 Fetching top products by status (limit={limit})")
+    logger.info("📦 Fetching top products by status (limit=%s)", limit)
+    _log_filters_debug("📦 Top Products by Status", filters)
     
     # Query real product totals
     query = f"""
@@ -1195,7 +1267,7 @@ def get_top_products_by_status(filters: DashboardFilters, limit: int = 10):
     df = get_data(query, params)
     
     if df.empty:
-        print("⚠️ No product data found")
+        logger.info("⚠️ No product data found")
         return TopProductsByStatusResponse(data=[], is_mock=True)
     
     # Apply mock status distribution to real totals
@@ -1204,6 +1276,8 @@ def get_top_products_by_status(filters: DashboardFilters, limit: int = 10):
     for _, row in df.iterrows():
         total_rev = float(row['total_revenue'] or 0)
         total_count = int(row['total_count'] or 0)
+        sku_value = row.get("product_sku")
+        sku = None if pd.isna(sku_value) else str(sku_value)
         
         # Vary completion rate between 92-98% for realism
         completion_rate = random.uniform(0.92, 0.98)
@@ -1212,7 +1286,7 @@ def get_top_products_by_status(filters: DashboardFilters, limit: int = 10):
         
         data.append(ProductByStatus(
             product_name=row['product_name'],
-            product_sku=row['product_sku'],
+            product_sku=sku,
             brand=row['brand'] or "Unknown",
             total_revenue=total_rev,
             completed_revenue=round(total_rev * completion_rate, 2),
@@ -1223,7 +1297,7 @@ def get_top_products_by_status(filters: DashboardFilters, limit: int = 10):
             stuck_count=max(0, int(total_count * stuck_rate))
         ))
     
-    print(f"✅ Retrieved top {len(data)} products with mock status breakdown")
+    logger.info("✅ Retrieved top products with status breakdown (count=%s)", len(data))
     
     return TopProductsByStatusResponse(data=data, is_mock=True)
 
@@ -1256,7 +1330,8 @@ def get_top_brands_by_type(filters: DashboardFilters, limit: int = 10):
     where_sql, params = build_where_clause(filters)
     params['limit'] = limit
     
-    print(f"🏷️ Fetching top brands by type (limit={limit})")
+    logger.info("🏷️ Fetching top brands by type (limit=%s)", limit)
+    _log_filters_debug("🏷️ Top Brands by Type", filters)
     
     query = f"""
         SELECT 
@@ -1277,7 +1352,7 @@ def get_top_brands_by_type(filters: DashboardFilters, limit: int = 10):
     df = get_data(query, params)
     
     if df.empty:
-        print("⚠️ No brand data found")
+        logger.info("⚠️ No brand data found")
         return TopBrandsByTypeResponse(data=[])
     
     data = [
@@ -1292,7 +1367,7 @@ def get_top_brands_by_type(filters: DashboardFilters, limit: int = 10):
         for _, row in df.iterrows()
     ]
     
-    print(f"✅ Retrieved top {len(data)} brands by type")
+    logger.info("✅ Retrieved top brands by type (count=%s)", len(data))
 
     return TopBrandsByTypeResponse(data=data)
 
@@ -1330,7 +1405,8 @@ def get_catalog_kpis(filters: DashboardFilters):
     """
     where_sql, params = build_where_clause(filters)
 
-    print(f"📦 Executing Catalog KPIs Query with filters: {filters.model_dump()}")
+    logger.info("📦 Executing Catalog KPIs Query")
+    _log_filters_debug("📦 Catalog KPIs Query", filters)
 
     # Calculate prior period for comparison
     if filters.start_date and filters.end_date:
@@ -1462,7 +1538,14 @@ def get_catalog_kpis(filters: DashboardFilters):
             prior_margin = float(prior_margin_df.iloc[0]['avg_margin'])
             avg_margin_change = round(avg_margin - prior_margin, 2)
 
-    print(f"✅ Catalog KPIs: SKUs={active_skus}, Currencies={currency_count}, Margin={avg_margin:.1f}% if avg_margin else 'N/A', Health={supplier_health:.1f}%")
+    avg_margin_display = f"{avg_margin:.1f}%" if avg_margin is not None else "N/A"
+    logger.info(
+        "✅ Catalog KPIs calculated (active_skus=%s, currencies=%s, avg_margin=%s, supplier_health=%s)",
+        active_skus,
+        currency_count,
+        avg_margin_display,
+        round(float(supplier_health), 1),
+    )
 
     return CatalogKPIs(
         active_skus=active_skus,
@@ -1504,7 +1587,8 @@ def get_product_scatter(filters: DashboardFilters):
     """
     where_sql, params = build_where_clause(filters)
 
-    print(f"📊 Executing Product Scatter Query with filters: {filters.model_dump()}")
+    logger.info("📊 Executing Product Scatter Query")
+    _log_filters_debug("📊 Product Scatter Query", filters)
 
     query = f"""
         SELECT
@@ -1528,7 +1612,7 @@ def get_product_scatter(filters: DashboardFilters):
     df = get_data(query, params)
 
     if df.empty:
-        print("⚠️ No product scatter data found")
+        logger.info("⚠️ No product scatter data found")
         return ProductScatterResponse(
             data=[],
             median_revenue=0.0,
@@ -1546,7 +1630,13 @@ def get_product_scatter(filters: DashboardFilters):
     median_revenue = float(df['total_revenue'].median())
     median_quantity = float(df['total_quantity'].median())
 
-    print(f"📊 Product Scatter: {total_products} total, returning top {len(df)}, median_revenue={median_revenue:.2f}, median_quantity={median_quantity:.2f}")
+    logger.info(
+        "📊 Product Scatter prepared (total_products=%s, returned=%s, median_revenue=%s, median_quantity=%s)",
+        total_products,
+        len(df),
+        round(float(median_revenue), 2),
+        round(float(median_quantity), 2),
+    )
 
     # Assign quadrants
     def assign_quadrant(row):
@@ -1587,7 +1677,7 @@ def get_product_scatter(filters: DashboardFilters):
 
     # Log summary
     quadrant_counts = df['quadrant'].value_counts().to_dict()
-    print(f"📈 Quadrant distribution: {quadrant_counts}")
+    logger.info("📈 Quadrant distribution: %s", quadrant_counts)
 
     return ProductScatterResponse(
         data=data_points,
@@ -1617,11 +1707,12 @@ def get_product_movers(filters: DashboardFilters):
     }
     ```
     """
-    print(f"📈 Executing Product Movers Query with filters: {filters.model_dump()}")
+    logger.info("📈 Executing Product Movers Query")
+    _log_filters_debug("📈 Product Movers Query", filters)
 
     # Calculate prior period
     if not filters.start_date or not filters.end_date:
-        print("⚠️ Date range required for movers calculation")
+        logger.info("⚠️ Date range required for movers calculation")
         return ProductMoversResponse(risers=[], fallers=[])
 
     date_range_days = (filters.end_date - filters.start_date).days
@@ -1743,10 +1834,20 @@ def get_product_movers(filters: DashboardFilters):
                     prior_revenue=float(row['prior_revenue'])
                 ))
 
-    print(f"✅ Product Movers: {len(risers)} risers, {len(fallers)} fallers")
+    logger.info("✅ Product Movers calculated (risers=%s, fallers=%s)", len(risers), len(fallers))
     if risers:
-        print(f"   Top riser: {risers[0].product_name} (+{risers[0].growth_pct:.1f}%)")
+        if settings.DEBUG:
+            logger.debug(
+                "   Top riser: %s (+%s%%)",
+                risers[0].product_name,
+                round(float(risers[0].growth_pct), 1),
+            )
     if fallers:
-        print(f"   Top faller: {fallers[0].product_name} ({fallers[0].growth_pct:.1f}%)")
+        if settings.DEBUG:
+            logger.debug(
+                "   Top faller: %s (%s%%)",
+                fallers[0].product_name,
+                round(float(fallers[0].growth_pct), 1),
+            )
 
     return ProductMoversResponse(risers=risers, fallers=fallers)

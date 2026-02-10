@@ -79,6 +79,12 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup resources on application shutdown"""
     print(f"🛑 Shutting down {settings.APP_NAME}")
+    try:
+        llm_service = chat.get_llm_service()
+        llm_service.close()
+        print("✅ Closed LLM client")
+    except Exception:
+        pass
 
 
 @app.get("/health", response_model=HealthResponse, tags=["System"])

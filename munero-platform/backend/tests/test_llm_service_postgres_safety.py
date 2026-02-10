@@ -195,7 +195,11 @@ class TestLLMServicePostgresSafety(unittest.TestCase):
         )
 
         self.assertIn("NULLIF(regexp_replace(order_price_in_aed::text", prompt)
+        self.assertIn("ROUND(SUM(", prompt)
+        self.assertIn("::numeric, 2)::double precision", prompt)
         self.assertIn("to_char(NULLIF(order_date::text, '')::date, 'YYYY-MM')", prompt)
+        self.assertNotIn("GROUP BY month", prompt)
+        self.assertIn("GROUP BY 1", prompt)
         self.assertIn(f"WHERE {self.llm_service.FILTER_PLACEHOLDER_TOKEN}", prompt)
 
     def test_build_sql_prompt_sqlite_avoids_postgres_functions(self):
@@ -211,3 +215,69 @@ class TestLLMServicePostgresSafety(unittest.TestCase):
         self.assertNotIn("regexp_replace", prompt)
         self.assertIn("strftime('%Y-%m', order_date)", prompt)
 
+    def test_extract_sql_from_response_allows_blank_lines(self):
+        service = self.llm_service.LLMService()
+        response = (
+            "Here is the query you requested:\n\n"
+            "SELECT product_name,\n"
+            "       SUM(order_price_in_aed) AS revenue\n\n"
+            "FROM fact_orders\n"
+            "WHERE __MUNERO_FILTERS__\n"
+            "GROUP BY product_name\n"
+            "ORDER BY revenue DESC\n"
+            "LIMIT 5;\n\n"
+            "This returns the top products."
+        )
+
+        extracted = service.extract_sql_from_response(response)
+        self.assertIn("FROM fact_orders", extracted)
+        self.assertIn("WHERE __MUNERO_FILTERS__", extracted)
+        self.assertTrue(extracted.strip().endswith(";"))
+        self.assertNotIn("This returns the top products", extracted)
+
+    def test_extract_sql_from_response_ignores_semicolons_in_strings(self):
+        service = self.llm_service.LLMService()
+        response = "SELECT 'a;b' AS example, 1 AS value FROM fact_orders WHERE __MUNERO_FILTERS__;"
+        extracted = service.extract_sql_from_response(response)
+        self.assertIn("SELECT 'a;b'", extracted)
+        self.assertTrue(extracted.strip().endswith(";"))
+
+    def test_extract_sql_from_response_handles_code_fences(self):
+        service = self.llm_service.LLMService()
+        response = (
+            "```sql\n"
+            "SELECT 1 AS value\n\n"
+            "FROM fact_orders\n"
+            "WHERE __MUNERO_FILTERS__;\n"
+            "```\n"
+            "extra text"
+        )
+        extracted = service.extract_sql_from_response(response)
+        self.assertIn("FROM fact_orders", extracted)
+        self.assertNotIn("extra text", extracted)
+
+    def test_inject_filters_rejects_token_in_comment(self):
+        service = self.llm_service.LLMService()
+        sql = "SELECT 1 FROM fact_orders WHERE 1=1 /* __MUNERO_FILTERS__ */;"
+        with self.assertRaises(ValueError):
+            service.inject_filters_into_sql(sql, self.llm_service.DashboardFilters())
+
+    def test_inject_filters_rejects_token_in_string(self):
+        service = self.llm_service.LLMService()
+        sql = "SELECT '__MUNERO_FILTERS__' AS token FROM fact_orders WHERE is_test = 0;"
+        with self.assertRaises(ValueError):
+            service.inject_filters_into_sql(sql, self.llm_service.DashboardFilters())
+
+    def test_inject_filters_rejects_token_multiple_times(self):
+        service = self.llm_service.LLMService()
+        sql = "SELECT 1 FROM fact_orders WHERE __MUNERO_FILTERS__ OR __MUNERO_FILTERS__;"
+        with self.assertRaises(ValueError):
+            service.inject_filters_into_sql(sql, self.llm_service.DashboardFilters())
+
+    def test_inject_filters_replaces_token_by_position(self):
+        service = self.llm_service.LLMService()
+        sql = "SELECT 1 FROM fact_orders WHERE __MUNERO_FILTERS__;"
+        injected, params = service.inject_filters_into_sql(sql, self.llm_service.DashboardFilters())
+        self.assertIn("WHERE is_test = 0", injected)
+        self.assertNotIn("__MUNERO_FILTERS__", injected)
+        self.assertIsInstance(params, dict)

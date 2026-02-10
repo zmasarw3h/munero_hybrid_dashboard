@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     DB_URI: Optional[str] = Field(default=None, validation_alias=AliasChoices("DB_URI", "DATABASE_URL"))
     # Postgres per-statement timeout (milliseconds). Applied via connection options.
     DB_STATEMENT_TIMEOUT_MS: int = 30000
+    # Legacy behavior: return empty DataFrame on query errors.
+    # In hosted mode, set to False so outages/misconfig surface as API errors.
+    DB_RETURN_EMPTY_ON_ERROR: bool = True
     
     # LLM Configuration
     # Provider name. For hosted deployments, default to Gemini.
@@ -62,6 +65,11 @@ class Settings(BaseSettings):
     # Query Settings
     MAX_DISPLAY_ROWS: int = 1000
     SHOW_SQL_DEFAULT: bool = True
+
+    # Chat export hardening (recommended for hosted deployments)
+    # When set, /api/chat/export-csv requires a signed short-lived export token.
+    EXPORT_SIGNING_SECRET: Optional[str] = None
+    EXPORT_TOKEN_TTL_S: int = 900
     
     # SmartRender Configuration
     MAX_CHART_CATEGORIES: int = 15

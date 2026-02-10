@@ -209,6 +209,10 @@ class ChatResponse(BaseModel):
     """
     answer_text: str = Field(..., description="Natural language summary/answer")
     sql_query: Optional[str] = Field(None, description="The SQL query that was generated and executed")
+    export_token: Optional[str] = Field(
+        None,
+        description="Signed short-lived token required for /api/chat/export-csv (hosted hardening).",
+    )
     data: Optional[List[Dict[str, Any]]] = Field(None, description="Query result data as list of dicts")
     chart_config: Optional[ChartConfig] = Field(None, description="Visualization configuration")
     row_count: int = Field(default=0, description="Number of rows returned")

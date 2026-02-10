@@ -6,7 +6,6 @@ Handles natural language to SQL conversion with dashboard filter context.
 import re
 import pandas as pd
 from typing import Optional, Tuple, Any
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from app.models import DashboardFilters
 from app.core.config import settings
@@ -37,6 +36,235 @@ LLM_CONFIG = {
     "retries": settings.LLM_RETRIES,
     "sql_timeout": settings.SQL_TIMEOUT,  # Timeout for SQL execution in seconds
 }
+
+def _match_postgres_dollar_quote_delimiter(text: str, start: int) -> str | None:
+    if start >= len(text) or text[start] != "$":
+        return None
+
+    end = text.find("$", start + 1)
+    if end == -1:
+        return None
+
+    tag = text[start + 1 : end]
+    if any((not (ch.isalnum() or ch == "_")) for ch in tag):
+        return None
+
+    return text[start : end + 1]
+
+
+def _find_occurrences_outside_sql_literals(
+    sql: str,
+    needle: str,
+    *,
+    start: int = 0,
+    max_matches: int | None = None,
+) -> list[int]:
+    if not needle:
+        return []
+
+    indices: list[int] = []
+    i = max(0, int(start))
+
+    state = "code"
+    dollar_delim: str | None = None
+
+    while i < len(sql):
+        ch = sql[i]
+
+        if state == "code":
+            if sql.startswith(needle, i):
+                indices.append(i)
+                if max_matches is not None and len(indices) >= max_matches:
+                    return indices
+                i += len(needle)
+                continue
+
+            if ch == "'":
+                state = "single_quote"
+                i += 1
+                continue
+            if ch == '"':
+                state = "double_quote"
+                i += 1
+                continue
+            if ch == "-" and i + 1 < len(sql) and sql[i + 1] == "-":
+                state = "line_comment"
+                i += 2
+                continue
+            if ch == "/" and i + 1 < len(sql) and sql[i + 1] == "*":
+                state = "block_comment"
+                i += 2
+                continue
+
+            if ch == "$":
+                delim = _match_postgres_dollar_quote_delimiter(sql, i)
+                if delim:
+                    state = "dollar_quote"
+                    dollar_delim = delim
+                    i += len(delim)
+                    continue
+
+            i += 1
+            continue
+
+        if state == "single_quote":
+            if ch == "'":
+                if i + 1 < len(sql) and sql[i + 1] == "'":
+                    i += 2
+                    continue
+                state = "code"
+                i += 1
+                continue
+            i += 1
+            continue
+
+        if state == "double_quote":
+            if ch == '"':
+                if i + 1 < len(sql) and sql[i + 1] == '"':
+                    i += 2
+                    continue
+                state = "code"
+                i += 1
+                continue
+            i += 1
+            continue
+
+        if state == "line_comment":
+            if ch == "\n":
+                state = "code"
+            i += 1
+            continue
+
+        if state == "block_comment":
+            if ch == "*" and i + 1 < len(sql) and sql[i + 1] == "/":
+                state = "code"
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if state == "dollar_quote":
+            if dollar_delim and sql.startswith(dollar_delim, i):
+                state = "code"
+                i += len(dollar_delim)
+                dollar_delim = None
+                continue
+            i += 1
+            continue
+
+        i += 1
+
+    return indices
+
+
+def _is_identifier_char(ch: str) -> bool:
+    return ch.isalnum() or ch == "_"
+
+
+def _find_first_keyword_outside_sql_literals(
+    sql: str,
+    keywords: tuple[str, ...],
+    *,
+    start: int = 0,
+) -> int | None:
+    upper_sql = sql.upper()
+    upper_keywords = tuple(k.upper() for k in keywords)
+
+    i = max(0, int(start))
+    state = "code"
+    dollar_delim: str | None = None
+
+    while i < len(sql):
+        ch = sql[i]
+
+        if state == "code":
+            for keyword in upper_keywords:
+                end = i + len(keyword)
+                if end > len(sql):
+                    continue
+                if not upper_sql.startswith(keyword, i):
+                    continue
+                before_ok = i == 0 or not _is_identifier_char(sql[i - 1])
+                after_ok = end == len(sql) or not _is_identifier_char(sql[end])
+                if before_ok and after_ok:
+                    return i
+
+            if ch == "'":
+                state = "single_quote"
+                i += 1
+                continue
+            if ch == '"':
+                state = "double_quote"
+                i += 1
+                continue
+            if ch == "-" and i + 1 < len(sql) and sql[i + 1] == "-":
+                state = "line_comment"
+                i += 2
+                continue
+            if ch == "/" and i + 1 < len(sql) and sql[i + 1] == "*":
+                state = "block_comment"
+                i += 2
+                continue
+
+            if ch == "$":
+                delim = _match_postgres_dollar_quote_delimiter(sql, i)
+                if delim:
+                    state = "dollar_quote"
+                    dollar_delim = delim
+                    i += len(delim)
+                    continue
+
+            i += 1
+            continue
+
+        if state == "single_quote":
+            if ch == "'":
+                if i + 1 < len(sql) and sql[i + 1] == "'":
+                    i += 2
+                    continue
+                state = "code"
+                i += 1
+                continue
+            i += 1
+            continue
+
+        if state == "double_quote":
+            if ch == '"':
+                if i + 1 < len(sql) and sql[i + 1] == '"':
+                    i += 2
+                    continue
+                state = "code"
+                i += 1
+                continue
+            i += 1
+            continue
+
+        if state == "line_comment":
+            if ch == "\n":
+                state = "code"
+            i += 1
+            continue
+
+        if state == "block_comment":
+            if ch == "*" and i + 1 < len(sql) and sql[i + 1] == "/":
+                state = "code"
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if state == "dollar_quote":
+            if dollar_delim and sql.startswith(dollar_delim, i):
+                state = "code"
+                i += len(dollar_delim)
+                dollar_delim = None
+                continue
+            i += 1
+            continue
+
+        i += 1
+
+    return None
 
 
 # ============================================================================
@@ -102,6 +330,16 @@ class LLMService:
             )
             self._gemini = GeminiClient(config)
         return self._gemini
+
+    def close(self) -> None:
+        client = self._gemini
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception:
+            pass
+        self._gemini = None
     
     def check_connection(self) -> bool:
         """
@@ -273,7 +511,8 @@ FOREIGN KEY RELATIONSHIPS (for reference - usually not needed due to denormaliza
         """
         Replace the placeholder token with the parameterized predicate and return params.
 
-        The LLM output must contain `__MUNERO_FILTERS__` exactly once.
+        The LLM output must contain `__MUNERO_FILTERS__` exactly once and it must
+        appear in executable SQL (not inside comments or quoted strings/identifiers).
         """
         token_count = sql.count(FILTER_PLACEHOLDER_TOKEN)
         if token_count != 1:
@@ -282,11 +521,24 @@ FOREIGN KEY RELATIONSHIPS (for reference - usually not needed due to denormaliza
                     f"Generated SQL is missing required filters placeholder: {FILTER_PLACEHOLDER_TOKEN}"
                 )
             raise ValueError(
-                f"Generated SQL contains filters placeholder multiple times: {FILTER_PLACEHOLDER_TOKEN}"
+                    f"Generated SQL contains filters placeholder multiple times: {FILTER_PLACEHOLDER_TOKEN}"
+                )
+
+        token_positions = _find_occurrences_outside_sql_literals(
+            sql,
+            FILTER_PLACEHOLDER_TOKEN,
+            max_matches=2,
+        )
+        if len(token_positions) != 1:
+            raise ValueError(
+                f"Generated SQL must include {FILTER_PLACEHOLDER_TOKEN} exactly once outside comments/quotes."
             )
 
         predicate, params = self.build_filter_predicate(filters)
-        return sql.replace(FILTER_PLACEHOLDER_TOKEN, predicate), params
+        start = token_positions[0]
+        end = start + len(FILTER_PLACEHOLDER_TOKEN)
+        injected_sql = f"{sql[:start]}{predicate}{sql[end:]}"
+        return injected_sql, params
 
     def _build_sql_prompt(self, question: str, filters: Optional[DashboardFilters]) -> str:
         """
@@ -315,10 +567,22 @@ FOREIGN KEY RELATIONSHIPS (for reference - usually not needed due to denormaliza
         )
         revenue_expr = numeric_expr_template.format(col="order_price_in_aed")
         cogs_expr = numeric_expr_template.format(col="cogs_in_aed")
+        round_revenue_sum_expr = (
+            f"ROUND(SUM({revenue_expr})::numeric, 2)::double precision"
+            if settings.db_dialect == "postgresql"
+            else f"ROUND(SUM({revenue_expr}), 2)"
+        )
 
         month_grouping = (
             f"to_char({order_date_expr}, 'YYYY-MM')" if settings.db_dialect == "postgresql"
             else "strftime('%Y-%m', order_date)"
+        )
+
+        group_by_alias_rule = (
+            "On PostgreSQL, do NOT use SELECT aliases in GROUP BY/HAVING. Use positional refs (GROUP BY 1) "
+            "or repeat the full expression."
+            if settings.db_dialect == "postgresql"
+            else "Avoid SELECT aliases in GROUP BY/HAVING. Use positional refs (GROUP BY 1) or repeat the expression."
         )
 
         filter_section = f"""
@@ -360,17 +624,18 @@ CRITICAL SQL RULES:
 5. NEVER use write/admin keywords: INSERT, UPDATE, DELETE, MERGE, CREATE, ALTER, DROP, TRUNCATE, GRANT, REVOKE, INTO, COPY, EXEC/EXECUTE, CALL, VACUUM, PRAGMA, ATTACH/DETACH
 6. Dates in order_date are in YYYY-MM-DD format
 7. For monthly grouping: {month_grouping}
-8. For "Top N" queries: Use ORDER BY <metric> DESC LIMIT N
-9. Always use table alias if needed (e.g., fo for fact_orders)
-10. Round currency values: ROUND(SUM({revenue_expr}), 2)
-11. Handle NULL COGS: COALESCE({cogs_expr}, 0)
-12. End queries with semicolon
-13. NO markdown formatting in output - just raw SQL
+8. {group_by_alias_rule}
+9. For "Top N" queries: Use ORDER BY <metric> DESC LIMIT N
+10. Always use table alias if needed (e.g., fo for fact_orders)
+11. Round currency values: {round_revenue_sum_expr}
+12. Handle NULL COGS: COALESCE({cogs_expr}, 0)
+13. End queries with semicolon
+14. NO markdown formatting in output - just raw SQL
 
 EXAMPLE QUERIES:
 ----------------
 Q: "What are my top 5 products by revenue?"
-A: SELECT product_name, ROUND(SUM({revenue_expr}), 2) as total_revenue 
+A: SELECT product_name, {round_revenue_sum_expr} as total_revenue 
    FROM fact_orders 
    WHERE {FILTER_PLACEHOLDER_TOKEN}
    GROUP BY product_name 
@@ -378,14 +643,14 @@ A: SELECT product_name, ROUND(SUM({revenue_expr}), 2) as total_revenue
    LIMIT 5;
 
 Q: "Show monthly revenue trend"
-A: SELECT {month_grouping} as month, ROUND(SUM({revenue_expr}), 2) as revenue 
+A: SELECT {month_grouping} as month, {round_revenue_sum_expr} as revenue 
    FROM fact_orders 
    WHERE {FILTER_PLACEHOLDER_TOKEN}
-   GROUP BY month 
-   ORDER BY month;
+   GROUP BY 1 
+   ORDER BY 1;
 
 Q: "What is total revenue?"
-A: SELECT ROUND(SUM({revenue_expr}), 2) as total_revenue 
+A: SELECT {round_revenue_sum_expr} as total_revenue 
    FROM fact_orders 
    WHERE {FILTER_PLACEHOLDER_TOKEN};
 
@@ -398,30 +663,20 @@ SQL:"""
 
     def _invoke_llm_with_timeout(self, prompt: str) -> str:
         """
-        Invoke the LLM with timeout protection.
+        Invoke the LLM (network timeout is enforced by the Gemini client).
         
         Args:
             prompt: The prompt to send to the LLM
             
         Returns:
             str: The LLM response content
-            
-        Raises:
-            TimeoutError: If the request exceeds the timeout
         """
-        def _invoke() -> str:
-            if self.provider != "gemini":
-                raise ValueError(f"Unsupported LLM provider: {self.provider}")
+        if self.provider != "gemini":
+            raise ValueError(f"Unsupported LLM provider: {self.provider}")
+        try:
             return self.gemini.generate_text(prompt)
-        
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_invoke)
-            try:
-                return future.result(timeout=self.llm_timeout)
-            except FuturesTimeoutError:
-                raise TimeoutError(f"LLM request timed out after {self.llm_timeout} seconds")
-            except GeminiClientError as e:
-                raise Exception("LLM invocation failed") from e
+        except GeminiClientError as e:
+            raise Exception("LLM invocation failed") from e
 
     def extract_sql_from_response(self, response: str) -> str:
         """
@@ -437,33 +692,38 @@ SQL:"""
         # Step 0: Remove <think> tags (DeepSeek-R1 specific)
         response = self._remove_think_tags(response)
         response = response.strip()
-        
+
+        sql_candidate = response
+
         # Method 1: Extract from ```sql code block
-        match = re.search(r'```sql\s+(.*?)\s+```', response, re.DOTALL | re.IGNORECASE)
+        match = re.search(r"```sql\s+(.*?)\s+```", response, re.DOTALL | re.IGNORECASE)
         if match:
-            return match.group(1).strip()
-        
-        # Method 2: Extract from generic ``` code block
-        match = re.search(r'```\s+(.*?)\s+```', response, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        
-        # Method 3: Find SELECT/WITH statement
-        match = re.search(
-            r'((?:WITH|SELECT|INSERT|UPDATE|DELETE)\s+.*?)(?:;|\n\n|$)',
-            response,
-            re.DOTALL | re.IGNORECASE
+            sql_candidate = match.group(1).strip()
+        else:
+            # Method 2: Extract from generic ``` code block
+            match = re.search(r"```\s+(.*?)\s+```", response, re.DOTALL)
+            if match:
+                sql_candidate = match.group(1).strip()
+
+        cleaned = re.sub(r"^(SQL:|Query:)\s*", "", sql_candidate, flags=re.IGNORECASE).strip()
+        statement_start = _find_first_keyword_outside_sql_literals(cleaned, ("WITH", "SELECT"))
+        if statement_start is None:
+            return cleaned.strip()
+
+        semicolon_positions = _find_occurrences_outside_sql_literals(
+            cleaned,
+            ";",
+            start=statement_start,
+            max_matches=1,
         )
-        if match:
-            sql = match.group(1).strip()
-            # Ensure it ends with semicolon
-            if not sql.endswith(';'):
-                sql += ';'
-            return sql
-        
-        # Method 4: Remove common prefixes and return
-        cleaned = re.sub(r'^(SQL:|Query:)\s*', '', response, flags=re.IGNORECASE)
-        return cleaned.strip()
+        if semicolon_positions:
+            sql = cleaned[statement_start : semicolon_positions[0] + 1]
+        else:
+            sql = cleaned[statement_start:].rstrip()
+            if not sql.endswith(";"):
+                sql += ";"
+
+        return sql.strip()
     
     def _remove_think_tags(self, response: str) -> str:
         """
@@ -549,6 +809,11 @@ SQL:"""
         )
         revenue_expr = numeric_expr_template.format(col="order_price_in_aed")
         cogs_expr = numeric_expr_template.format(col="cogs_in_aed")
+        round_revenue_sum_expr = (
+            f"ROUND(SUM({revenue_expr})::numeric, 2)::double precision"
+            if settings.db_dialect == "postgresql"
+            else f"ROUND(SUM({revenue_expr}), 2)"
+        )
         month_grouping = (
             f"to_char({order_date_expr}, 'YYYY-MM')" if settings.db_dialect == "postgresql"
             else "strftime('%Y-%m', order_date)"
@@ -573,6 +838,8 @@ HOSTED POSTGRES TYPE SAFETY (Important):
 - If numeric columns might be stored as text, coerce them safely, e.g.:
   - revenue numeric expr: {revenue_expr}
   - cogs numeric expr: {cogs_expr}
+- Postgres does NOT support ROUND(double precision, integer). For 2-decimal rounding, cast to numeric:
+  - rounded revenue sum: {round_revenue_sum_expr}
 - If order_date might be stored as text, cast safely:
   - date expr: {order_date_expr}
   - month grouping: {month_grouping}
@@ -607,6 +874,16 @@ REPAIRED SQL TEMPLATE:"""
                 f"Repaired SQL must include {FILTER_PLACEHOLDER_TOKEN} exactly once (found={token_count})"
             )
 
+        token_positions = _find_occurrences_outside_sql_literals(
+            sql_query,
+            FILTER_PLACEHOLDER_TOKEN,
+            max_matches=2,
+        )
+        if len(token_positions) != 1:
+            raise Exception(
+                f"Repaired SQL must include {FILTER_PLACEHOLDER_TOKEN} exactly once outside comments/quotes."
+            )
+
         return sql_query
 
     def execute_sql(
@@ -616,7 +893,7 @@ REPAIRED SQL TEMPLATE:"""
         params: Optional[dict[str, Any]] = None,
     ) -> pd.DataFrame:
         """
-        Execute SQL query with timeout protection.
+        Execute SQL query (server-side statement timeout is enforced by the DB connection).
         
         Args:
             sql: SQL query to execute
@@ -626,25 +903,14 @@ REPAIRED SQL TEMPLATE:"""
         Returns:
             pd.DataFrame: Query results
             
-        Raises:
-            TimeoutError: If query exceeds timeout
-            Exception: If query execution fails
         """
         sql_conn: Any = conn or engine
-        
-        def _execute():
-            return execute_query_df(sql, conn=sql_conn, params=params)
-        
-        try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_execute)
-                try:
-                    return future.result(timeout=self.sql_timeout)
-                except FuturesTimeoutError:
-                    raise TimeoutError(f"SQL query timed out after {self.sql_timeout} seconds")
-        finally:
-            # If the caller provided a connection, they own its lifecycle.
-            pass
+        return execute_query_df(
+            sql,
+            conn=sql_conn,
+            params=params,
+            max_rows=int(settings.MAX_DISPLAY_ROWS),
+        )
 
     def query(
         self, 

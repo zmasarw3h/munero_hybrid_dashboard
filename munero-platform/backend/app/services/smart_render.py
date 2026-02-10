@@ -5,6 +5,8 @@ instead of rendering directly. The frontend (React/Recharts) renders based on th
 """
 import re
 import pandas as pd
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Tuple, List, Dict, Any, Optional, Literal, cast
 
 from app.models import ChartConfig
@@ -545,6 +547,21 @@ class SmartRenderService:
                 if pd.isna(value):
                     record[str(col)] = None
                 else:
+                    if isinstance(value, (datetime, date)):
+                        record[str(col)] = value.isoformat()
+                        continue
+                    if isinstance(value, Decimal):
+                        record[str(col)] = float(value)
+                        continue
+
+                    item = getattr(value, "item", None)
+                    if callable(item):
+                        try:
+                            record[str(col)] = item()
+                            continue
+                        except Exception:
+                            pass
+
                     record[str(col)] = value
             records.append(record)
         
