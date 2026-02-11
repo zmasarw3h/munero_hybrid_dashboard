@@ -763,7 +763,9 @@ def get_client_scatter(filters: DashboardFilters):
     query = f"""
         SELECT 
             client_name,
-            client_country,
+            -- Postgres requires every selected column to be grouped or aggregated.
+            -- Country is metadata at the client level; take a stable representative value.
+            MIN(client_country) as client_country,
             order_type,
             SUM({_sql_numeric_expr("order_price_in_aed")}) as type_revenue,
             COUNT(DISTINCT order_number) as type_orders
