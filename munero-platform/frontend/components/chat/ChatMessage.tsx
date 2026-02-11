@@ -2,11 +2,10 @@
 
 import { useState, useRef } from 'react';
 import { toPng } from 'html-to-image';
-import { ChevronDown, ChevronUp, Copy, Check, AlertTriangle, Download, Image } from 'lucide-react';
+import { ChevronDown, ChevronUp, Copy, Check, AlertTriangle, Download, Image as ImageIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ChatMessage as ChatMessageType } from '@/lib/types';
 import { ExportableChart } from './ExportableChart';
-import { cn } from '@/lib/utils';
 import { apiClient } from '@/lib/api-client';
 
 interface ChatMessageProps {
@@ -19,10 +18,14 @@ export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
     const [copied, setCopied] = useState(false);
     const [isExporting, setIsExporting] = useState(false);
     const [isExportingPng, setIsExportingPng] = useState(false);
+    const [exportError, setExportError] = useState<string | null>(null);
     const chartRef = useRef<HTMLDivElement>(null);
 
     const isUser = message.role === 'user';
     const response = message.response;
+    const requiresExportToken = process.env.NODE_ENV === 'production';
+    const exportTokenMissing = requiresExportToken && !response?.export_token;
+    const canExportCSV = Boolean(response?.sql_query) && !exportTokenMissing;
 
     const handleCopySql = async () => {
         if (!response?.sql_query) return;
@@ -38,7 +41,10 @@ export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
 
     const handleExportCSV = async () => {
         if (!response?.sql_query) return;
+        if (exportTokenMissing) return;
+
         setIsExporting(true);
+        setExportError(null);
         try {
             await apiClient.exportChatCSV(
                 response.sql_query,
@@ -47,6 +53,7 @@ export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
                 response.export_token
             );
         } catch (err) {
+            setExportError(err instanceof Error ? err.message : 'Failed to export CSV.');
             console.error('Failed to export CSV:', err);
         } finally {
             setIsExporting(false);
@@ -118,16 +125,18 @@ export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
                         {/* Export buttons toolbar */}
                         <div className="absolute top-2 right-2 z-10 flex gap-1">
                             <Button
+                                type="button"
                                 variant="ghost"
                                 size="icon"
                                 className="h-7 w-7 bg-background/80 hover:bg-background"
                                 onClick={handleExportCSV}
-                                disabled={isExporting}
-                                title="Download CSV"
+                                disabled={isExporting || !canExportCSV}
+                                title={exportTokenMissing ? 'CSV export is disabled (backend not configured)' : 'Download CSV'}
                             >
                                 <Download className="h-4 w-4" />
                             </Button>
                             <Button
+                                type="button"
                                 variant="ghost"
                                 size="icon"
                                 className="h-7 w-7 bg-background/80 hover:bg-background"
@@ -135,7 +144,7 @@ export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
                                 disabled={isExportingPng}
                                 title="Download PNG"
                             >
-                                <Image className="h-4 w-4" />
+                                <ImageIcon className="h-4 w-4" />
                             </Button>
                         </div>
 
@@ -146,6 +155,20 @@ export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
                             data={response.data}
                             title={response.chart_config.title}
                         />
+
+                        {exportTokenMissing && (
+                            <p className="mt-2 text-xs text-muted-foreground">
+                                CSV export is disabled (backend not configured).
+                            </p>
+                        )}
+
+                        {exportError && (
+                            <div className="mt-2 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-md px-3 py-2">
+                                <p className="text-xs text-red-800 dark:text-red-200">
+                                    {exportError}
+                                </p>
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -153,6 +176,7 @@ export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
                 {response?.sql_query && (
                     <div className="border rounded-md overflow-hidden">
                         <button
+                            type="button"
                             onClick={() => setSqlExpanded(!sqlExpanded)}
                             className="w-full flex items-center justify-between px-3 py-2 text-xs text-muted-foreground hover:bg-accent/50 transition-colors"
                         >
@@ -170,6 +194,7 @@ export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
                                     <code>{response.sql_query}</code>
                                 </pre>
                                 <Button
+                                    type="button"
                                     variant="ghost"
                                     size="icon"
                                     className="absolute top-2 right-2 h-6 w-6 bg-slate-800 hover:bg-slate-700"

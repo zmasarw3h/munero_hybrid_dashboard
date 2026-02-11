@@ -38,6 +38,40 @@ export class APIClient {
         return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
+    private async getErrorMessageFromResponse(response: Response, fallback: string): Promise<string> {
+        const contentType = response.headers.get('content-type') || '';
+
+        if (contentType.includes('application/json')) {
+            const body = await response.json().catch(() => null);
+            if (body && typeof body === 'object') {
+                const obj = body as Record<string, unknown>;
+                const detail = obj.detail ?? obj.message ?? obj.error;
+                if (typeof detail === 'string' && detail.trim()) {
+                    return detail.trim();
+                }
+                if (detail != null) {
+                    try {
+                        return JSON.stringify(detail);
+                    } catch {
+                        // ignore
+                    }
+                }
+                try {
+                    const keys = Object.keys(obj);
+                    if (keys.length > 0) {
+                        return JSON.stringify(body);
+                    }
+                } catch {
+                    // ignore
+                }
+            }
+        }
+
+        const text = await response.text().catch(() => '');
+        if (text.trim()) return text.trim();
+        return fallback;
+    }
+
     private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
         const url = `${this.baseUrl}${endpoint}`;
         const method = (options?.method || 'GET').toUpperCase();
@@ -81,10 +115,16 @@ export class APIClient {
                         // Handle various error response formats
                         let message = `API Error: ${response.status}`;
                         if (typeof error === 'object' && error !== null) {
+                            const errorObj = error as Record<string, unknown>;
+                            const detail = errorObj.detail ?? errorObj.message ?? errorObj.error;
                             message =
-                                (error as any).detail ||
-                                (error as any).message ||
-                                (Object.keys(error).length > 0 ? JSON.stringify(error) : message);
+                                (typeof detail === 'string' && detail.trim()
+                                    ? detail
+                                    : detail != null
+                                        ? JSON.stringify(detail)
+                                        : Object.keys(errorObj).length > 0
+                                            ? JSON.stringify(errorObj)
+                                            : message);
                         }
                         throw new Error(message);
                     }
@@ -310,31 +350,84 @@ export class APIClient {
      * Downloads full results (up to 10,000 rows) without LIMIT constraint
      */
     async exportChatCSV(sqlQuery: string, filters?: DashboardFilters, filename?: string, exportToken?: string): Promise<void> {
-        const response = await fetch(`${this.baseUrl}/api/chat/export-csv`, {
+        const url = `${this.baseUrl}/api/chat/export-csv`;
+        const requestInit: RequestInit = {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Accept': 'text/csv',
+                'Content-Type': 'application/json',
+            },
             body: JSON.stringify({
                 sql_query: sqlQuery,
                 filters,
                 export_token: exportToken,
-                filename: filename || 'chat-export.csv'
+                filename: filename || 'chat-export.csv',
             }),
-        });
+        };
 
-        if (!response.ok) {
-            throw new Error('Failed to export CSV');
+        const maxAttempts = 8;
+        let lastError: unknown = null;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                const response = await fetch(url, requestInit);
+
+                if (!response.ok) {
+                    const transientStatuses = new Set([429, 502, 503, 504]);
+                    const isLastAttempt = attempt >= maxAttempts - 1;
+
+                    if (!isLastAttempt && transientStatuses.has(response.status)) {
+                        // If 503 is due to misconfiguration, fail fast instead of retrying.
+                        if (response.status === 503) {
+                            const detail = await this.getErrorMessageFromResponse(response, '');
+                            if (/not configured/i.test(detail)) {
+                                throw new Error(`CSV export failed (503): ${detail}`);
+                            }
+                        }
+
+                        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 15000);
+                        await this.sleep(backoffMs);
+                        continue;
+                    }
+
+                    const detail = await this.getErrorMessageFromResponse(response, 'Failed to export CSV.');
+                    throw new Error(`CSV export failed (${response.status}): ${detail}`);
+                }
+
+                // Trigger browser download
+                const blob = await response.blob();
+                const blobUrl = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = filename || 'chat-export.csv';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(blobUrl);
+                return;
+            } catch (error) {
+                lastError = error;
+                const isLastAttempt = attempt >= maxAttempts - 1;
+                const isNetworkError =
+                    error instanceof TypeError ||
+                    (error instanceof Error && /failed to fetch|networkerror/i.test(error.message));
+
+                if (!isLastAttempt && isNetworkError) {
+                    const backoffMs = Math.min(1000 * Math.pow(2, attempt), 15000);
+                    await this.sleep(backoffMs);
+                    continue;
+                }
+
+                if (isNetworkError) {
+                    throw new Error(
+                        `Failed to reach backend at ${this.baseUrl}. If this is a Render free-tier service, it may be sleeping; wait ~30–60s and try again.`
+                    );
+                }
+                throw error;
+            }
         }
 
-        // Trigger browser download
-        const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename || 'chat-export.csv';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
+        throw lastError ?? new Error('Failed to export CSV.');
     }
 }
 

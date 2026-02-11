@@ -573,6 +573,12 @@ FOREIGN KEY RELATIONSHIPS (for reference - usually not needed due to denormaliza
             else f"ROUND(SUM({revenue_expr}), 2)"
         )
 
+        client_name_contains_example = (
+            "client_name ILIKE '%loylogic%'"
+            if settings.db_dialect == "postgresql"
+            else "LOWER(client_name) LIKE '%' || LOWER('loylogic') || '%'"
+        )
+
         month_grouping = (
             f"to_char({order_date_expr}, 'YYYY-MM')" if settings.db_dialect == "postgresql"
             else "strftime('%Y-%m', order_date)"
@@ -615,6 +621,12 @@ TERMINOLOGY MAPPING (Critical - use these definitions):
 - "quantity sold" → SUM(quantity)
 - "AOV" or "average order value" → SUM({revenue_expr}) / NULLIF(COUNT(DISTINCT order_number), 0)
 
+CLIENT NAME MATCHING (Important):
+--------------------------------
+- Client names are often longer than what the user types (e.g. "Loylogic Rewards FZE").
+- If the user provides a partial client name, prefer a case-insensitive substring match instead of exact equality.
+  Example: {client_name_contains_example}
+
 CRITICAL SQL RULES:
 -------------------
 1. fact_orders is DENORMALIZED - NO JOINS needed for most queries!
@@ -625,12 +637,13 @@ CRITICAL SQL RULES:
 6. Dates in order_date are in YYYY-MM-DD format
 7. For monthly grouping: {month_grouping}
 8. {group_by_alias_rule}
-9. For "Top N" queries: Use ORDER BY <metric> DESC LIMIT N
-10. Always use table alias if needed (e.g., fo for fact_orders)
-11. Round currency values: {round_revenue_sum_expr}
-12. Handle NULL COGS: COALESCE({cogs_expr}, 0)
-13. End queries with semicolon
-14. NO markdown formatting in output - just raw SQL
+9. For client filters from user-entered text, prefer substring matching (see CLIENT NAME MATCHING).
+10. For "Top N" queries: Use ORDER BY <metric> DESC LIMIT N
+11. Always use table alias if needed (e.g., fo for fact_orders)
+12. Round currency values: {round_revenue_sum_expr}
+13. Handle NULL COGS: COALESCE({cogs_expr}, 0)
+14. End queries with semicolon
+15. NO markdown formatting in output - just raw SQL
 
 EXAMPLE QUERIES:
 ----------------
@@ -647,6 +660,15 @@ A: SELECT {month_grouping} as month, {round_revenue_sum_expr} as revenue
    FROM fact_orders 
    WHERE {FILTER_PLACEHOLDER_TOKEN}
    GROUP BY 1 
+   ORDER BY 1;
+
+Q: "Show me a daily trend of the revenue sold to loylogic during June 2025"
+A: SELECT {order_date_expr} as order_date, {round_revenue_sum_expr} as revenue
+   FROM fact_orders
+   WHERE {FILTER_PLACEHOLDER_TOKEN}
+     AND {client_name_contains_example}
+     AND {order_date_expr} BETWEEN '2025-06-01' AND '2025-06-30'
+   GROUP BY 1
    ORDER BY 1;
 
 Q: "What is total revenue?"
@@ -818,6 +840,11 @@ SQL:"""
             f"to_char({order_date_expr}, 'YYYY-MM')" if settings.db_dialect == "postgresql"
             else "strftime('%Y-%m', order_date)"
         )
+        client_name_contains_example = (
+            "client_name ILIKE '%loylogic%'"
+            if settings.db_dialect == "postgresql"
+            else "LOWER(client_name) LIKE '%' || LOWER('loylogic') || '%'"
+        )
 
         prompt = f"""You are a {db_name} SQL expert for the 'Munero' sales analytics database.
 
@@ -843,6 +870,11 @@ HOSTED POSTGRES TYPE SAFETY (Important):
 - If order_date might be stored as text, cast safely:
   - date expr: {order_date_expr}
   - month grouping: {month_grouping}
+
+CLIENT NAME MATCHING (Important):
+- Client names are often longer than what the user types (e.g. "Loylogic Rewards FZE").
+- If the user provides a partial client name, prefer a case-insensitive substring match instead of exact equality.
+  Example: {client_name_contains_example}
 
 EXECUTION ERROR (from the database):
 {db_error}

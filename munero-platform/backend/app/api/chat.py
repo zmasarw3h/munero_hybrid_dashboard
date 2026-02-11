@@ -37,6 +37,7 @@ from app.core.logging_utils import (
 )
 from app.core.export_tokens import ExportTokenError, make_export_token, verify_export_token
 from app.core.database import engine, execute_query_df
+from app.sql_rewrite import maybe_broaden_client_name_equals_to_contains
 
 
 router = APIRouter()
@@ -350,6 +351,45 @@ def chat_with_data(request: ChatRequest):
             logger.info("✅ [%s] SQL executed (rows=%s, cols=%s)", correlation_id, row_count, len(df.columns))
             if getattr(df, "attrs", {}).get("truncated"):
                 warnings.append(f"Results truncated to {settings.MAX_DISPLAY_ROWS} rows")
+
+            if df.empty:
+                rewritten = maybe_broaden_client_name_equals_to_contains(
+                    sql_query,
+                    db_dialect=settings.db_dialect,
+                    params=sql_params,
+                )
+                if rewritten is not None:
+                    rewritten_sql, rewritten_params, rewritten_warning = rewritten
+                    try:
+                        validate_sql_safety(rewritten_sql)
+                        df_retry = llm_service.execute_sql(rewritten_sql, params=rewritten_params)
+                        if not df_retry.empty:
+                            df = df_retry
+                            sql_query = rewritten_sql
+                            sql_params = rewritten_params
+                            row_count = len(df)
+                            warnings.append(rewritten_warning)
+                            logger.info(
+                                "✅ [%s] SQL re-executed after broadening client match (rows=%s, cols=%s, sql=%s)",
+                                correlation_id,
+                                row_count,
+                                len(df.columns),
+                                redact_sql_for_log(sql_query),
+                            )
+                            if getattr(df, "attrs", {}).get("truncated"):
+                                warnings.append(f"Results truncated to {settings.MAX_DISPLAY_ROWS} rows")
+                    except SQLSafetyError as rewrite_exc:
+                        logger.warning(
+                            "🚫 [%s] Client match rewrite blocked by safety (reason=%s)",
+                            correlation_id,
+                            str(rewrite_exc),
+                        )
+                    except Exception as rewrite_exc:
+                        logger.warning(
+                            "⚠️ [%s] Client match rewrite failed (exc_type=%s)",
+                            correlation_id,
+                            type(rewrite_exc).__name__,
+                        )
         except TimeoutError as e:
             _log_exception(
                 correlation_id=correlation_id,

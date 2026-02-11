@@ -50,6 +50,19 @@ Security principle: **no secrets in the frontend**. The only Vercel env var shou
 
 **Model selection note**: If you still see frequent bad SQL after the Postgres-proofing fixes + auto-repair retry, try switching to a stronger model (if available in your Google project), e.g. `LLM_MODEL=gemini-2.5-pro`. Keep `gemini-2.5-flash` if reliability is good; it’s typically cheaper/faster.
 
+### Chat CSV export (token-gated)
+
+The AI Assistant chart toolbar supports **Download CSV** via `POST /api/chat/export-csv`.
+
+Hosted hardening: exports are guarded by short-lived HMAC-signed tokens bound to `(sql_query, filters)`.
+
+Render env vars to set:
+
+- `EXPORT_SIGNING_SECRET` (required in production; a long random secret)
+- `EXPORT_TOKEN_TTL_S` (optional; default `900`)
+
+If `EXPORT_SIGNING_SECRET` is unset while `DEBUG=false`, the export endpoint returns `503` and the UI will show CSV export as disabled.
+
 ### DB connection hardening
 
 - Psycopg v3 is used (`psycopg[binary]`), and the backend normalizes DSNs:
@@ -123,6 +136,8 @@ Helper script:
 2. Set/verify Render env vars:
    - `DATABASE_URL` (Supabase pooler, read-only login, `postgresql+psycopg://...`)
    - `LLM_API_KEY` (or `GEMINI_API_KEY`)
+   - `EXPORT_SIGNING_SECRET` (required for AI chat CSV export on hosted)
+   - `EXPORT_TOKEN_TTL_S` (optional; defaults to `900`)
    - `CORS_ORIGINS` (include Vercel)
 3. Verify in order:
    - `GET /health`

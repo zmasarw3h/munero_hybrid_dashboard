@@ -263,7 +263,8 @@ Chat:
 - Confirm no raw table rows are being included in LLM prompts by default (unless explicitly enabled)
 
 CSV export:
-- Use the UI export or call `POST /api/chat/export-csv` and confirm a CSV download
+- Ensure `EXPORT_SIGNING_SECRET` is set on the backend (required when `DEBUG=false`).
+- Use the UI export (requires `export_token` from the chat response) or call `POST /api/chat/export-csv` and confirm a CSV download.
 
 Frontend:
 - Load Vercel site → confirm no CORS errors in browser devtools
