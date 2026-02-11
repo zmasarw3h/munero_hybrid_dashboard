@@ -256,6 +256,43 @@ class TestSmartRender(unittest.TestCase):
         self.assertEqual(config.y_column, "orders")
         self.assertEqual(config.secondary_y_column, "total_revenue")
 
+    def test_daily_trend_returns_line_even_with_many_points(self):
+        dates = [f"2025-06-{day:02d}" for day in range(1, 31)]
+        df = self.smart_render.pd.DataFrame(
+            {
+                "order_date": dates,
+                "revenue": [float(day) for day in range(1, 31)],
+            }
+        )
+
+        service = self.smart_render.SmartRenderService()
+        config = service.determine_chart_type(
+            df,
+            "Show me a daily trend of revenue during June 2025",
+        )
+
+        self.assertEqual(config.type, "line")
+        self.assertEqual(config.x_column, "order_date")
+        self.assertEqual(config.y_column, "revenue")
+
+    def test_numeric_day_bucket_can_render_line_chart(self):
+        df = self.smart_render.pd.DataFrame(
+            {
+                "day": list(range(1, 31)),
+                "revenue": [float(day) for day in range(1, 31)],
+            }
+        )
+
+        service = self.smart_render.SmartRenderService()
+        config = service.determine_chart_type(
+            df,
+            "Show me a daily trend of revenue",
+        )
+
+        self.assertEqual(config.type, "line")
+        self.assertEqual(config.x_column, "day")
+        self.assertEqual(config.y_column, "revenue")
+
     def test_maybe_aggregate_does_not_warn_when_already_grouped(self):
         df = self.smart_render.pd.DataFrame(
             {

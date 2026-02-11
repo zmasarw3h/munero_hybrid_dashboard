@@ -633,6 +633,14 @@ ORDER TYPE VALUES (Important):
   - 'gift_card'
   - 'merchandise'
 
+TIME SERIES / TREND (Important):
+-------------------------------
+- If the question asks for a trend over time (daily/weekly/monthly/yearly), return exactly ONE time bucket column and ONE metric
+  (add a second metric only if explicitly requested).
+- For daily trends: use {order_date_expr} AS order_date (a real date bucket). Do NOT use EXTRACT(DAY FROM ...) — it is numeric and loses month/year context.
+- For monthly trends: use {month_grouping} AS month.
+- Always GROUP BY 1 ORDER BY 1.
+
 BREAKDOWNS / VS / SPLIT QUERIES (Important):
 -------------------------------------------
 - If the question implies a split/breakdown/vs/compare across a dimension (e.g. by order_type), return BOTH:
@@ -676,6 +684,7 @@ A: SELECT {month_grouping} as month, {round_revenue_sum_expr} as revenue
    ORDER BY 1;
 
 Q: "Show me a daily trend of the revenue sold to loylogic during June 2025"
+(Note: Do NOT use EXTRACT(DAY FROM ...) for daily trends; use the full date bucket in {order_date_expr}.)
 A: SELECT {order_date_expr} as order_date, {round_revenue_sum_expr} as revenue
    FROM fact_orders
    WHERE {FILTER_PLACEHOLDER_TOKEN}

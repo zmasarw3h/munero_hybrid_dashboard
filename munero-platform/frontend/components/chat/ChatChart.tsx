@@ -26,6 +26,9 @@ interface ChatChartProps {
     data: Record<string, unknown>[];
 }
 
+const TABLE_ROW_LIMIT = 10;
+const DUAL_AXIS_BAR_CHART_LIMIT = 5;
+
 // Color palette for pie chart slices
 const CHART_COLORS = [
     '#3b82f6', // blue-500
@@ -125,7 +128,7 @@ export function ChatChart({ config, data }: ChatChartProps) {
     // Table display
     if (config.type === 'table') {
         const columns = Object.keys(data[0] || {});
-        const displayData = data.slice(0, 10); // Show first 10 rows
+        const displayData = data.slice(0, TABLE_ROW_LIMIT);
 
         return (
             <div className="overflow-x-auto">
@@ -153,9 +156,9 @@ export function ChatChart({ config, data }: ChatChartProps) {
                         ))}
                     </tbody>
                 </table>
-                {data.length > 10 && (
+                {displayData.length === TABLE_ROW_LIMIT && (
                     <p className="text-xs text-muted-foreground text-center mt-2">
-                        Showing 10 of {data.length} rows
+                        Showing {displayData.length} rows
                     </p>
                 )}
             </div>
@@ -170,47 +173,95 @@ export function ChatChart({ config, data }: ChatChartProps) {
 
         if (isHorizontal) {
             if (secondaryKey) {
+                const chartData = data.slice(0, DUAL_AXIS_BAR_CHART_LIMIT);
+                const tableData = data.slice(0, TABLE_ROW_LIMIT);
+                const columns = Object.keys(data[0] || {});
                 return (
-                    <ResponsiveContainer width="100%" height={200}>
-                        <BarChart
-                            data={data}
-                            layout="vertical"
-                            margin={{ top: 5, right: 10, left: 10, bottom: 5 }}
-                        >
-                            <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} />
-                            <XAxis xAxisId="left" type="number" tickFormatter={formatNumber} tick={{ fontSize: 10 }} />
-                            <XAxis
-                                xAxisId="right"
-                                type="number"
-                                orientation="top"
-                                tickFormatter={formatNumber}
-                                tick={{ fontSize: 10 }}
-                            />
-                            <YAxis
-                                type="category"
-                                dataKey={config.x_column}
-                                width={100}
-                                tick={{ fontSize: 10 }}
-                                tickFormatter={(value: string) => truncateLabel(formatCategoryLabel(value), 15)}
-                            />
-                            <Tooltip content={<CustomTooltip />} />
-                            <Legend />
-                            <Bar
-                                xAxisId="left"
-                                dataKey={primaryKey}
-                                name={formatKeyLabel(primaryKey)}
-                                fill="#3b82f6"
-                                radius={[0, 4, 4, 0]}
-                            />
-                            <Bar
-                                xAxisId="right"
-                                dataKey={secondaryKey}
-                                name={formatKeyLabel(secondaryKey)}
-                                fill="#10b981"
-                                radius={[0, 4, 4, 0]}
-                            />
-                        </BarChart>
-                    </ResponsiveContainer>
+                    <div className="space-y-3">
+                        <ResponsiveContainer width="100%" height={200}>
+                            <BarChart
+                                data={chartData}
+                                layout="vertical"
+                                margin={{ top: 5, right: 10, left: 10, bottom: 5 }}
+                            >
+                                <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} />
+                                <XAxis
+                                    xAxisId="left"
+                                    type="number"
+                                    tickFormatter={formatNumber}
+                                    tick={{ fontSize: 10 }}
+                                />
+                                <XAxis
+                                    xAxisId="right"
+                                    type="number"
+                                    orientation="top"
+                                    tickFormatter={formatNumber}
+                                    tick={{ fontSize: 10 }}
+                                />
+                                <YAxis
+                                    type="category"
+                                    dataKey={config.x_column}
+                                    width={100}
+                                    tick={{ fontSize: 10 }}
+                                    tickFormatter={(value: string) => truncateLabel(formatCategoryLabel(value), 15)}
+                                />
+                                <Tooltip content={<CustomTooltip />} />
+                                <Legend />
+                                <Bar
+                                    xAxisId="left"
+                                    dataKey={primaryKey}
+                                    name={formatKeyLabel(primaryKey)}
+                                    fill="#3b82f6"
+                                    radius={[0, 4, 4, 0]}
+                                />
+                                <Bar
+                                    xAxisId="right"
+                                    dataKey={secondaryKey}
+                                    name={formatKeyLabel(secondaryKey)}
+                                    fill="#10b981"
+                                    radius={[0, 4, 4, 0]}
+                                />
+                            </BarChart>
+                        </ResponsiveContainer>
+
+                        {data.length > DUAL_AXIS_BAR_CHART_LIMIT && (
+                            <p className="text-xs text-muted-foreground text-center">
+                                Chart shows top {chartData.length} for readability. Table shows {tableData.length} rows.
+                            </p>
+                        )}
+
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-xs">
+                                <thead>
+                                    <tr className="border-b">
+                                        {columns.map((col) => (
+                                            <th key={col} className="text-left p-2 font-medium text-muted-foreground">
+                                                {col.replace(/_/g, ' ')}
+                                            </th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {tableData.map((row, idx) => (
+                                        <tr key={idx} className="border-b last:border-0">
+                                            {columns.map((col) => (
+                                                <td key={col} className="p-2">
+                                                    {typeof row[col] === 'number'
+                                                        ? formatNumber(row[col] as number)
+                                                        : String(row[col] ?? '')}
+                                                </td>
+                                            ))}
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                            {tableData.length === TABLE_ROW_LIMIT && (
+                                <p className="text-xs text-muted-foreground text-center mt-2">
+                                    Showing {tableData.length} rows
+                                </p>
+                            )}
+                        </div>
+                    </div>
                 );
             }
 
@@ -316,6 +367,9 @@ export function ChatChart({ config, data }: ChatChartProps) {
                     <XAxis
                         dataKey={config.x_column}
                         tick={{ fontSize: 10 }}
+                        tickFormatter={(value: unknown) => truncateLabel(formatCategoryLabel(value), 10)}
+                        interval="preserveStartEnd"
+                        minTickGap={16}
                     />
                     <YAxis yAxisId="left" tickFormatter={formatNumber} tick={{ fontSize: 10 }} />
                     {secondaryKey && (

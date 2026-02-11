@@ -18,6 +18,10 @@ from app.models import ChartConfig
 
 SMART_RENDER_CONFIG = {
     "max_display_rows": 15,         # Maximum rows to display in charts
+    "max_table_rows": 10,           # Maximum rows to display in tables
+    "max_time_series_points_daily": 180,    # Max points for daily line charts
+    "max_time_series_points_monthly": 120,  # Max points for monthly line charts
+    "max_time_series_points_yearly": 50,    # Max points for yearly line charts
     "long_label_threshold": 20,     # Character length to trigger horizontal bars
     "pie_chart_max_slices": 8,      # Maximum slices for readable pie chart
     "bar_chart_max_categories": 20, # Maximum categories before switching to table
@@ -100,29 +104,6 @@ class SmartRenderService:
                 secondary_y_column=None,
                 orientation="vertical"
             )
-        
-        # --- Detect numeric and non-numeric columns ---
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        non_numeric_cols = [col for col in df.columns if col not in numeric_cols]
-        
-        # --- Case 3: Too Many Columns (>3) or No Numeric Columns → Table ---
-        if len(df.columns) > 3 or len(numeric_cols) == 0:
-            return ChartConfig(
-                type="table", 
-                title="Query Results",
-                x_column=None,
-                y_column=None,
-                secondary_y_column=None,
-                orientation="vertical"
-            )
-        
-        # --- Determine label + metric columns ---
-        label_col = str(non_numeric_cols[0]) if non_numeric_cols else None
-        primary_metric, secondary_metric = self._choose_primary_and_secondary_metric(
-            question, [str(c) for c in numeric_cols]
-        )
-        wants_two_metrics = bool(secondary_metric) and self._wants_two_metrics(question)
-        secondary_metric_to_plot = secondary_metric if wants_two_metrics else None
 
         # --- Check for user explicit chart type request ---
         user_viz_type = self._detect_user_preference(question)
@@ -136,10 +117,90 @@ class SmartRenderService:
                 orientation="vertical",
             )
 
+        wants_time_series = self._wants_time_series(question, user_viz_type)
+
+        # --- Detect numeric and non-numeric columns ---
+        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        non_numeric_cols = [col for col in df.columns if col not in numeric_cols]
+
+        # No numeric metrics → Table
+        if len(numeric_cols) == 0:
+            return ChartConfig(
+                type="table",
+                title="Query Results",
+                x_column=None,
+                y_column=None,
+                secondary_y_column=None,
+                orientation="vertical",
+            )
+
+        # --- Determine label column ---
+        label_col = self._pick_time_like_column(df) if wants_time_series else (str(non_numeric_cols[0]) if non_numeric_cols else None)
+
+        if label_col is None:
+            # No suitable label axis: allow scatter when requested, or as a fallback for 2+ numeric metrics.
+            if len(numeric_cols) >= 2 and len(df) > 1 and (user_viz_type == "scatter" or user_viz_type is None):
+                scatter_primary, scatter_secondary = self._choose_primary_and_secondary_metric(
+                    question, [str(c) for c in numeric_cols]
+                )
+                if scatter_secondary is not None:
+                    title = self._generate_title(question, "scatter", scatter_primary, scatter_secondary)
+                    return ChartConfig(
+                        type="scatter",
+                        x_column=scatter_primary,
+                        y_column=scatter_secondary,
+                        secondary_y_column=None,
+                        orientation="vertical",
+                        title=title,
+                    )
+
+            return ChartConfig(
+                type="table",
+                title="Query Results",
+                x_column=None,
+                y_column=None,
+                secondary_y_column=None,
+                orientation="vertical",
+            )
+
+        # Prefer using non-label numeric columns as metrics (e.g., day should not be treated as y)
+        numeric_metric_cols = [str(c) for c in numeric_cols if str(c) != str(label_col)]
+        if len(numeric_metric_cols) == 0:
+            return ChartConfig(
+                type="table",
+                title="Query Results",
+                x_column=None,
+                y_column=None,
+                secondary_y_column=None,
+                orientation="vertical",
+            )
+
+        # --- Case 3: Too Many Columns (>3) → Table (unless it is a pure time-series with extra numeric metrics) ---
+        if len(df.columns) > 3:
+            extra_non_numeric = [
+                str(c)
+                for c in df.columns
+                if str(c) != str(label_col) and str(c) not in [str(n) for n in numeric_cols]
+            ]
+            if not (wants_time_series and len(extra_non_numeric) == 0):
+                return ChartConfig(
+                    type="table",
+                    title="Query Results",
+                    x_column=None,
+                    y_column=None,
+                    secondary_y_column=None,
+                    orientation="vertical",
+                )
+
+        # --- Determine primary + secondary metrics ---
+        primary_metric, secondary_metric = self._choose_primary_and_secondary_metric(question, numeric_metric_cols)
+        wants_two_metrics = bool(secondary_metric) and self._wants_two_metrics(question)
+        secondary_metric_to_plot = secondary_metric if wants_two_metrics else None
+
         # --- Scatter Plot ---
         # Only choose scatter when explicitly requested, or when there is no suitable label axis.
-        if len(numeric_cols) >= 2 and len(df) > 1:
-            if user_viz_type == "scatter" or (user_viz_type is None and label_col is None):
+        if len(numeric_metric_cols) >= 2 and len(df) > 1:
+            if user_viz_type == "scatter":
                 title = self._generate_title(question, "scatter", primary_metric, secondary_metric)
                 return ChartConfig(
                     type="scatter",
@@ -150,22 +211,14 @@ class SmartRenderService:
                     title=title,
                 )
 
-        if label_col is None:
-            return ChartConfig(
-                type="table",
-                title="Query Results",
-                x_column=None,
-                y_column=None,
-                secondary_y_column=None,
-                orientation="vertical",
-            )
-
         # --- Time Series Detection ---
         is_time_series = self._is_time_series_column(label_col, df)
 
         # --- Categories for label-based charts ---
         unique_values = df[label_col].nunique()
-        if unique_values > self.config["bar_chart_max_categories"]:
+        if unique_values > self.config["bar_chart_max_categories"] and not (
+            is_time_series or user_viz_type == "line"
+        ):
             return ChartConfig(
                 type="table",
                 title="Query Results",
@@ -286,6 +339,12 @@ class SmartRenderService:
         
         # --- Sort data appropriately ---
         df_viz = self._sort_data(df_viz, config)
+
+        # --- Truncate time series for readability ---
+        if config.type == "line" and config.x_column and config.x_column in df_viz.columns:
+            granularity = self._infer_time_series_granularity(config.x_column, df_viz[config.x_column])
+            df_viz, ts_warnings = self._truncate_time_series(df_viz, config.x_column, granularity)
+            warnings.extend(ts_warnings)
         
         # --- Handle pie chart "Others" grouping ---
         if config.type == "pie" and len(df_viz) > self.config["pie_chart_max_slices"]:
@@ -295,10 +354,16 @@ class SmartRenderService:
         # --- Limit rows for display (except time series) ---
         is_time_series = config.type == "line"
         
-        if not is_time_series and len(df_viz) > self.config["max_display_rows"]:
+        max_rows = (
+            self.config["max_table_rows"] if config.type == "table" else self.config["max_display_rows"]
+        )
+        if not is_time_series and len(df_viz) > max_rows:
             original_count = len(df_viz)
-            df_viz = df_viz.head(self.config["max_display_rows"])
-            warnings.append(f"Showing top {self.config['max_display_rows']} of {original_count} items")
+            df_viz = df_viz.head(max_rows)
+            if config.type == "table":
+                warnings.append(f"Showing top {max_rows} of {original_count} rows")
+            else:
+                warnings.append(f"Showing top {max_rows} of {original_count} items")
         
         # --- Clean data (remove NaN for charts) ---
         if config.type != "table":
@@ -424,6 +489,136 @@ class SmartRenderService:
         ]
         question_lower = question.lower()
         return any(keyword in question_lower for keyword in proportion_keywords)
+
+    def _wants_time_series(self, question: str, user_viz_type: Optional[str]) -> bool:
+        """
+        Detect whether the user likely wants a time-series chart.
+
+        We treat explicit line/trend intent as time-series, as well as common granularity hints.
+        """
+        if user_viz_type == "line":
+            return True
+
+        q = (question or "").lower()
+        time_series_keywords = [
+            "trend",
+            "over time",
+            "time series",
+            "timeseries",
+            "daily",
+            "weekly",
+            "monthly",
+            "yearly",
+            "by day",
+            "by week",
+            "by month",
+            "by year",
+        ]
+        return any(kw in q for kw in time_series_keywords)
+
+    def _sample_series_strings(self, series: Any, max_samples: int = 20) -> List[str]:
+        """Best-effort sampling of a Series-like object as strings (works with pandas and the test stub)."""
+        try:
+            values = series.astype(str).head(max_samples).tolist()
+            return [str(v) for v in values]
+        except Exception:
+            values = getattr(series, "_values", None)
+            if values is None:
+                return []
+            return [str(v) for v in list(values)[:max_samples]]
+
+    def _pick_time_like_column(self, df: pd.DataFrame) -> Optional[str]:
+        """
+        Prefer a time-like column for time-series intent.
+
+        Priority:
+        1) Column name tokens include date/time keywords (works even if column is numeric, e.g., day).
+        2) Datetime dtype.
+        3) Sample values look like YYYY / YYYY-MM / YYYY-MM-DD.
+        4) Fallback to first non-numeric column.
+        """
+        if df is None or df.empty:
+            return None
+
+        time_tokens = {"date", "time", "day", "week", "month", "year", "quarter", "period"}
+
+        for col in df.columns:
+            col_str = str(col)
+            tokens = [t for t in re.split(r"[_\s-]+", col_str.lower()) if t]
+            if any(t in time_tokens for t in tokens):
+                return col_str
+
+        for col in df.columns:
+            col_str = str(col)
+            try:
+                if pd.api.types.is_datetime64_any_dtype(df[col_str]):
+                    return col_str
+            except Exception:
+                pass
+
+        daily_re = re.compile(r"^\d{4}-\d{2}-\d{2}")
+        monthly_re = re.compile(r"^\d{4}-\d{2}$")
+        yearly_re = re.compile(r"^\d{4}$")
+
+        for col in df.columns:
+            col_str = str(col)
+            try:
+                samples = self._sample_series_strings(df[col_str], max_samples=20)
+            except Exception:
+                continue
+            if any(daily_re.match(v) for v in samples):
+                return col_str
+            if any(monthly_re.match(v) for v in samples):
+                return col_str
+            if any(yearly_re.match(v) for v in samples):
+                return col_str
+
+        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        non_numeric_cols = [col for col in df.columns if col not in numeric_cols]
+        return str(non_numeric_cols[0]) if non_numeric_cols else None
+
+    def _infer_time_series_granularity(
+        self, x_column_name: str, series: Any
+    ) -> Literal["daily", "monthly", "yearly"]:
+        name = (x_column_name or "").lower()
+        tokens = [t for t in re.split(r"[_\s-]+", name) if t]
+        if "year" in tokens:
+            return "yearly"
+        if "month" in tokens:
+            return "monthly"
+        if "day" in tokens or "date" in tokens or "time" in tokens:
+            return "daily"
+
+        samples = self._sample_series_strings(series, max_samples=20)
+        if any(re.match(r"^\d{4}-\d{2}-\d{2}", v) for v in samples):
+            return "daily"
+        if any(re.match(r"^\d{4}-\d{2}$", v) for v in samples):
+            return "monthly"
+        if any(re.match(r"^\d{4}$", v) for v in samples):
+            return "yearly"
+
+        return "daily"
+
+    def _truncate_time_series(
+        self, df: pd.DataFrame, x_col: str, granularity: Literal["daily", "monthly", "yearly"]
+    ) -> Tuple[pd.DataFrame, List[str]]:
+        warnings: List[str] = []
+
+        max_points_by_granularity = {
+            "daily": int(self.config["max_time_series_points_daily"]),
+            "monthly": int(self.config["max_time_series_points_monthly"]),
+            "yearly": int(self.config["max_time_series_points_yearly"]),
+        }
+        max_points = max_points_by_granularity.get(granularity, int(self.config["max_time_series_points_daily"]))
+
+        if len(df) > max_points:
+            original_count = len(df)
+            df = df.tail(max_points)
+            warnings.append(
+                f"Showing last {max_points} {granularity} points (out of {original_count}) for readability."
+            )
+
+        return df, warnings
 
     def _wants_two_metrics(self, question: str) -> bool:
         """
@@ -642,11 +837,17 @@ class SmartRenderService:
     def _sort_data(self, df: pd.DataFrame, config: ChartConfig) -> pd.DataFrame:
         """Sort data appropriately based on chart type."""
         if config.type == "line" and config.x_column:
-            # Time series: sort by date
+            # Time series: sort by x column
+            try:
+                if pd.api.types.is_numeric_dtype(df[config.x_column]):
+                    return df.sort_values(by=config.x_column)
+            except Exception:
+                pass
+
             try:
                 df = df.copy()
                 # Try to convert to datetime for proper sorting
-                df[config.x_column] = pd.to_datetime(df[config.x_column], errors='coerce')
+                df[config.x_column] = pd.to_datetime(df[config.x_column], errors="coerce")
                 df = df.sort_values(by=config.x_column)
             except Exception:
                 pass
