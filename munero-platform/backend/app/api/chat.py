@@ -617,7 +617,9 @@ def chat_with_data(request: ChatRequest):
         if debug_enabled:
             logger.debug("📦 [%s] Step 4: preparing data for response", correlation_id)
         
-        data_list, render_warnings = smart_render_service.prepare_data_for_chart(df, chart_config)
+        data_list, render_warnings = smart_render_service.prepare_data_for_chart(
+            df, chart_config, request.message
+        )
         warnings.extend(render_warnings)
         
         if render_warnings:

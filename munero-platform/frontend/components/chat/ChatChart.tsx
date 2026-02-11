@@ -5,6 +5,7 @@ import { ChatChartConfig } from '@/lib/types';
 import {
     BarChart,
     Bar,
+    ComposedChart,
     LineChart,
     Line,
     PieChart,
@@ -37,6 +38,29 @@ const CHART_COLORS = [
     '#84cc16', // lime-500
 ];
 
+function formatKeyLabel(value: string): string {
+    return value
+        .replace(/[_-]+/g, ' ')
+        .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatCategoryLabel(value: unknown): string {
+    const raw = String(value ?? '');
+    if (!raw) return '';
+    if (/^\d{4}-\d{2}(-\d{2})?$/.test(raw)) return raw;
+    if (raw.toUpperCase() === raw) return raw;
+
+    const spaced = raw.replace(/_/g, ' ');
+    if (raw === raw.toLowerCase()) {
+        return spaced.replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+    return spaced;
+}
+
+function truncateLabel(value: string, maxLength: number): string {
+    return value.length > maxLength ? value.slice(0, maxLength) + '...' : value;
+}
+
 // Format large numbers
 function formatNumber(value: number): string {
     if (Math.abs(value) >= 1000000) {
@@ -52,13 +76,15 @@ function formatNumber(value: number): string {
 function CustomTooltip({ active, payload, label }: {
     active?: boolean;
     payload?: Array<{ value: number; name: string; color: string }>;
-    label?: string;
+    label?: unknown;
 }) {
     if (!active || !payload?.length) return null;
 
     return (
         <div className="bg-background border border-border rounded-md shadow-lg p-2 text-xs">
-            {label && <p className="font-medium mb-1">{label}</p>}
+            {label != null && label !== '' && (
+                <p className="font-medium mb-1">{formatCategoryLabel(label)}</p>
+            )}
             {payload.map((entry, index) => (
                 <p key={index} style={{ color: entry.color }}>
                     {entry.name}: {typeof entry.value === 'number' ? formatNumber(entry.value) : entry.value}
@@ -141,9 +167,53 @@ export function ChatChart({ config, data }: ChatChartProps) {
         const isHorizontal = config.orientation === 'horizontal';
         const primaryKey = config.y_column || 'value';
         const secondaryKey = config.secondary_y_column;
-        const showLegend = Boolean(secondaryKey);
 
         if (isHorizontal) {
+            if (secondaryKey) {
+                return (
+                    <ResponsiveContainer width="100%" height={200}>
+                        <BarChart
+                            data={data}
+                            layout="vertical"
+                            margin={{ top: 5, right: 10, left: 10, bottom: 5 }}
+                        >
+                            <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} />
+                            <XAxis xAxisId="left" type="number" tickFormatter={formatNumber} tick={{ fontSize: 10 }} />
+                            <XAxis
+                                xAxisId="right"
+                                type="number"
+                                orientation="top"
+                                tickFormatter={formatNumber}
+                                tick={{ fontSize: 10 }}
+                            />
+                            <YAxis
+                                type="category"
+                                dataKey={config.x_column}
+                                width={100}
+                                tick={{ fontSize: 10 }}
+                                tickFormatter={(value: string) => truncateLabel(formatCategoryLabel(value), 15)}
+                            />
+                            <Tooltip content={<CustomTooltip />} />
+                            <Legend />
+                            <Bar
+                                xAxisId="left"
+                                dataKey={primaryKey}
+                                name={formatKeyLabel(primaryKey)}
+                                fill="#3b82f6"
+                                radius={[0, 4, 4, 0]}
+                            />
+                            <Bar
+                                xAxisId="right"
+                                dataKey={secondaryKey}
+                                name={formatKeyLabel(secondaryKey)}
+                                fill="#10b981"
+                                radius={[0, 4, 4, 0]}
+                            />
+                        </BarChart>
+                    </ResponsiveContainer>
+                );
+            }
+
             return (
                 <ResponsiveContainer width="100%" height={200}>
                     <BarChart
@@ -158,15 +228,57 @@ export function ChatChart({ config, data }: ChatChartProps) {
                             dataKey={config.x_column}
                             width={100}
                             tick={{ fontSize: 10 }}
-                            tickFormatter={(value: string) => value.length > 15 ? value.slice(0, 15) + '...' : value}
+                            tickFormatter={(value: string) => truncateLabel(formatCategoryLabel(value), 15)}
                         />
                         <Tooltip content={<CustomTooltip />} />
-                        {showLegend && <Legend />}
-                        <Bar dataKey={primaryKey} fill="#3b82f6" radius={[0, 4, 4, 0]} />
-                        {secondaryKey && (
-                            <Bar dataKey={secondaryKey} fill="#10b981" radius={[0, 4, 4, 0]} />
-                        )}
+                        <Bar
+                            dataKey={primaryKey}
+                            name={formatKeyLabel(primaryKey)}
+                            fill="#3b82f6"
+                            radius={[0, 4, 4, 0]}
+                        />
                     </BarChart>
+                </ResponsiveContainer>
+            );
+        }
+
+        if (secondaryKey) {
+            return (
+                <ResponsiveContainer width="100%" height={200}>
+                    <ComposedChart data={data} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis
+                            dataKey={config.x_column}
+                            tick={{ fontSize: 10 }}
+                            tickFormatter={(value: string) => truncateLabel(formatCategoryLabel(value), 10)}
+                        />
+                        <YAxis yAxisId="left" tickFormatter={formatNumber} tick={{ fontSize: 10 }} />
+                        <YAxis
+                            yAxisId="right"
+                            orientation="right"
+                            tickFormatter={formatNumber}
+                            tick={{ fontSize: 10 }}
+                        />
+                        <Tooltip content={<CustomTooltip />} />
+                        <Legend />
+                        <Bar
+                            yAxisId="left"
+                            dataKey={primaryKey}
+                            name={formatKeyLabel(primaryKey)}
+                            fill="#3b82f6"
+                            radius={[4, 4, 0, 0]}
+                        />
+                        <Line
+                            yAxisId="right"
+                            type="monotone"
+                            dataKey={secondaryKey}
+                            name={formatKeyLabel(secondaryKey)}
+                            stroke="#10b981"
+                            strokeWidth={2}
+                            dot={{ fill: '#10b981', r: 3 }}
+                            activeDot={{ r: 5 }}
+                        />
+                    </ComposedChart>
                 </ResponsiveContainer>
             );
         }
@@ -178,15 +290,16 @@ export function ChatChart({ config, data }: ChatChartProps) {
                     <XAxis
                         dataKey={config.x_column}
                         tick={{ fontSize: 10 }}
-                        tickFormatter={(value: string) => value.length > 10 ? value.slice(0, 10) + '...' : value}
+                        tickFormatter={(value: string) => truncateLabel(formatCategoryLabel(value), 10)}
                     />
                     <YAxis tickFormatter={formatNumber} tick={{ fontSize: 10 }} />
                     <Tooltip content={<CustomTooltip />} />
-                    {showLegend && <Legend />}
-                    <Bar dataKey={primaryKey} fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                    {secondaryKey && (
-                        <Bar dataKey={secondaryKey} fill="#10b981" radius={[4, 4, 0, 0]} />
-                    )}
+                    <Bar
+                        dataKey={primaryKey}
+                        name={formatKeyLabel(primaryKey)}
+                        fill="#3b82f6"
+                        radius={[4, 4, 0, 0]}
+                    />
                 </BarChart>
             </ResponsiveContainer>
         );
@@ -194,6 +307,8 @@ export function ChatChart({ config, data }: ChatChartProps) {
 
     // Line Chart
     if (config.type === 'line') {
+        const primaryKey = config.y_column || 'value';
+        const secondaryKey = config.secondary_y_column;
         return (
             <ResponsiveContainer width="100%" height={200}>
                 <LineChart data={data} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
@@ -202,20 +317,33 @@ export function ChatChart({ config, data }: ChatChartProps) {
                         dataKey={config.x_column}
                         tick={{ fontSize: 10 }}
                     />
-                    <YAxis tickFormatter={formatNumber} tick={{ fontSize: 10 }} />
+                    <YAxis yAxisId="left" tickFormatter={formatNumber} tick={{ fontSize: 10 }} />
+                    {secondaryKey && (
+                        <YAxis
+                            yAxisId="right"
+                            orientation="right"
+                            tickFormatter={formatNumber}
+                            tick={{ fontSize: 10 }}
+                        />
+                    )}
                     <Tooltip content={<CustomTooltip />} />
+                    {secondaryKey && <Legend />}
                     <Line
+                        yAxisId="left"
                         type="monotone"
-                        dataKey={config.y_column || 'value'}
+                        dataKey={primaryKey}
+                        name={formatKeyLabel(primaryKey)}
                         stroke="#3b82f6"
                         strokeWidth={2}
                         dot={{ fill: '#3b82f6', r: 3 }}
                         activeDot={{ r: 5 }}
                     />
-                    {config.secondary_y_column && (
+                    {secondaryKey && (
                         <Line
+                            yAxisId="right"
                             type="monotone"
-                            dataKey={config.secondary_y_column}
+                            dataKey={secondaryKey}
+                            name={formatKeyLabel(secondaryKey)}
                             stroke="#10b981"
                             strokeWidth={2}
                             dot={{ fill: '#10b981', r: 3 }}

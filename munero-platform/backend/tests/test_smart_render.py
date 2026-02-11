@@ -57,6 +57,43 @@ def _load_smart_render_module():
             def max(self):
                 return max(self._values) if self._values else None
 
+        class _FakeGroupByAgg:
+            def __init__(self, df, key_col: str, agg_cols: list[str]):
+                self._df = df
+                self._key_col = key_col
+                self._agg_cols = agg_cols
+
+            def sum(self):
+                keys = self._df._data.get(self._key_col, [])
+                groups: dict[object, dict[str, float]] = {}
+                order: list[object] = []
+                for idx, key in enumerate(keys):
+                    if key not in groups:
+                        groups[key] = {col: 0.0 for col in self._agg_cols}
+                        order.append(key)
+                    for col in self._agg_cols:
+                        value = self._df._data.get(col, [0] * len(keys))[idx]
+                        groups[key][col] += float(value or 0)
+
+                out: dict[str, list[object]] = {self._key_col: []}
+                for col in self._agg_cols:
+                    out[col] = []
+                for key in order:
+                    out[self._key_col].append(key)
+                    for col in self._agg_cols:
+                        out[col].append(groups[key][col])
+                return _FakeDataFrame(out)
+
+        class _FakeGroupBy:
+            def __init__(self, df, key_col: str):
+                self._df = df
+                self._key_col = key_col
+
+            def __getitem__(self, cols):
+                if isinstance(cols, str):
+                    cols = [cols]
+                return _FakeGroupByAgg(self._df, self._key_col, list(cols))
+
         class _FakeNullSeries:
             def __init__(self, values):
                 self._values = values
@@ -104,14 +141,20 @@ def _load_smart_render_module():
             def __getitem__(self, key):
                 return _FakeSeries(self._data[key])
 
+            def groupby(self, key_col: str, as_index: bool = False):  # noqa: ARG002
+                return _FakeGroupBy(self, key_col)
+
         pandas_stub.DataFrame = _FakeDataFrame
         pandas_stub.isna = lambda value: value is None
         pandas_stub.to_datetime = lambda value, errors=None: value
         pandas_stub.concat = lambda frames, ignore_index=False: frames[0]
 
+        def _is_numeric_dtype(value) -> bool:
+            return isinstance(value, _FakeSeries) and all(isinstance(v, (int, float)) for v in value._values)
+
         api_types = types.SimpleNamespace(
             is_datetime64_any_dtype=lambda _value: False,
-            is_numeric_dtype=lambda _value: False,
+            is_numeric_dtype=_is_numeric_dtype,
         )
         pandas_stub.api = types.SimpleNamespace(types=api_types)
 
@@ -153,7 +196,7 @@ class TestSmartRender(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.smart_render = _load_smart_render_module()
 
-    def test_two_metric_breakdown_prefers_grouped_bar(self):
+    def test_breakdown_defaults_to_single_metric(self):
         df = self.smart_render.pd.DataFrame(
             {
                 "order_type": ["gift_card", "merchandise"],
@@ -171,7 +214,88 @@ class TestSmartRender(unittest.TestCase):
         self.assertEqual(config.type, "bar")
         self.assertEqual(config.x_column, "order_type")
         self.assertEqual(config.y_column, "orders")
+        self.assertIsNone(config.secondary_y_column)
+
+    def test_revenue_breakdown_prefers_pie_when_multiple_categories(self):
+        df = self.smart_render.pd.DataFrame(
+            {
+                "order_type": ["gift_card", "merchandise"],
+                "orders": [10, 5],
+                "total_revenue": [1000.0, 500.0],
+            }
+        )
+
+        service = self.smart_render.SmartRenderService()
+        config = service.determine_chart_type(
+            df,
+            "show me revenue breakdown by product type",
+        )
+
+        self.assertEqual(config.type, "pie")
+        self.assertEqual(config.x_column, "order_type")
+        self.assertEqual(config.y_column, "total_revenue")
+        self.assertIsNone(config.secondary_y_column)
+
+    def test_explicit_orders_and_revenue_sets_secondary_metric(self):
+        df = self.smart_render.pd.DataFrame(
+            {
+                "order_type": ["gift_card", "merchandise"],
+                "orders": [10, 5],
+                "total_revenue": [1000.0, 500.0],
+            }
+        )
+
+        service = self.smart_render.SmartRenderService()
+        config = service.determine_chart_type(
+            df,
+            "orders + revenue by order_type",
+        )
+
+        self.assertEqual(config.type, "bar")
+        self.assertEqual(config.x_column, "order_type")
+        self.assertEqual(config.y_column, "orders")
         self.assertEqual(config.secondary_y_column, "total_revenue")
+
+    def test_maybe_aggregate_does_not_warn_when_already_grouped(self):
+        df = self.smart_render.pd.DataFrame(
+            {
+                "order_type": ["gift_card", "merchandise"],
+                "total_revenue": [1.0, 2.0],
+            }
+        )
+
+        service = self.smart_render.SmartRenderService()
+        config = self.smart_render.ChartConfig(
+            type="bar",
+            x_column="order_type",
+            y_column="total_revenue",
+            secondary_y_column=None,
+            orientation="vertical",
+            title="test",
+        )
+        _out_df, warnings = service._maybe_aggregate(df, config)
+        self.assertEqual(warnings, [])
+
+    def test_maybe_aggregate_warns_and_groups_when_duplicates_exist(self):
+        df = self.smart_render.pd.DataFrame(
+            {
+                "order_type": ["gift_card", "gift_card", "merchandise"],
+                "total_revenue": [1.0, 2.0, 3.0],
+            }
+        )
+
+        service = self.smart_render.SmartRenderService()
+        config = self.smart_render.ChartConfig(
+            type="bar",
+            x_column="order_type",
+            y_column="total_revenue",
+            secondary_y_column=None,
+            orientation="vertical",
+            title="test",
+        )
+        out_df, warnings = service._maybe_aggregate(df, config)
+        self.assertEqual(warnings, ["Auto-aggregated 3 rows into 2 groups by order_type."])
+        self.assertEqual(len(out_df), 2)
 
 
 if __name__ == "__main__":

@@ -121,6 +121,8 @@ class SmartRenderService:
         primary_metric, secondary_metric = self._choose_primary_and_secondary_metric(
             question, [str(c) for c in numeric_cols]
         )
+        wants_two_metrics = bool(secondary_metric) and self._wants_two_metrics(question)
+        secondary_metric_to_plot = secondary_metric if wants_two_metrics else None
 
         # --- Check for user explicit chart type request ---
         user_viz_type = self._detect_user_preference(question)
@@ -173,20 +175,19 @@ class SmartRenderService:
                 orientation="vertical",
             )
 
-        # --- 2-metric breakdowns (label + 2 numeric metrics) ---
-        if secondary_metric is not None:
+        # --- 2-metric results (plot both only if explicitly requested) ---
+        if secondary_metric_to_plot is not None:
             if user_viz_type == "line" or (user_viz_type is None and is_time_series):
                 title = self._generate_title(question, "line", label_col, primary_metric)
                 return ChartConfig(
                     type="line",
                     x_column=label_col,
                     y_column=primary_metric,
-                    secondary_y_column=secondary_metric,
+                    secondary_y_column=secondary_metric_to_plot,
                     orientation="vertical",
                     title=title,
                 )
 
-            # Prefer bar (grouped/dual-series) when label axis is categorical.
             max_label_length = df[label_col].astype(str).str.len().max()
             orientation: Literal["horizontal", "vertical"] = (
                 "horizontal" if max_label_length > self.config["long_label_threshold"] else "vertical"
@@ -196,7 +197,7 @@ class SmartRenderService:
                 type="bar",
                 x_column=label_col,
                 y_column=primary_metric,
-                secondary_y_column=secondary_metric,
+                secondary_y_column=secondary_metric_to_plot,
                 orientation=orientation,
                 title=title,
             )
@@ -213,23 +214,25 @@ class SmartRenderService:
                 title=title,
             )
 
-        # Pie should only be considered when there is exactly 1 numeric metric column.
-        if len(numeric_cols) == 1:
-            if user_viz_type == "pie" or (
+        # Pie should only be used when we are plotting a single metric.
+        if secondary_metric_to_plot is None and (
+            (user_viz_type == "pie" and not wants_two_metrics)
+            or (
                 user_viz_type is None
                 and unique_values <= self.config["pie_chart_max_slices"]
                 and unique_values >= 2
                 and self._looks_like_proportion_query(question)
-            ):
-                title = self._generate_title(question, "pie", label_col, primary_metric)
-                return ChartConfig(
-                    type="pie",
-                    x_column=label_col,  # names/labels
-                    y_column=primary_metric,  # values
-                    secondary_y_column=None,
-                    orientation="vertical",
-                    title=title,
-                )
+            )
+        ):
+            title = self._generate_title(question, "pie", label_col, primary_metric)
+            return ChartConfig(
+                type="pie",
+                x_column=label_col,  # names/labels
+                y_column=primary_metric,  # values
+                secondary_y_column=None,
+                orientation="vertical",
+                title=title,
+            )
 
         # --- Default: Bar Chart ---
         max_label_length = df[label_col].astype(str).str.len().max()
@@ -250,7 +253,8 @@ class SmartRenderService:
     def prepare_data_for_chart(
         self, 
         df: pd.DataFrame, 
-        config: ChartConfig
+        config: ChartConfig,
+        question: str = "",
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
         """
         Prepare DataFrame for JSON serialization and chart rendering.
@@ -275,6 +279,10 @@ class SmartRenderService:
         if config.x_column and config.y_column and config.type not in ("metric", "table"):
             df_viz, agg_warnings = self._maybe_aggregate(df_viz, config)
             warnings.extend(agg_warnings)
+
+        # --- Optional: fill missing enum categories for clarity ---
+        df_viz, fill_warnings = self._maybe_zero_fill_order_type(df_viz, config, question)
+        warnings.extend(fill_warnings)
         
         # --- Sort data appropriately ---
         df_viz = self._sort_data(df_viz, config)
@@ -356,6 +364,9 @@ class SmartRenderService:
             if config.y_column and config.x_column:
                 metric_name = self._format_column_title(config.y_column)
                 dimension_name = self._format_column_title(config.x_column)
+                if config.secondary_y_column:
+                    secondary_name = self._format_column_title(config.secondary_y_column)
+                    return f"Here's {metric_name} and {secondary_name} by {dimension_name}:"
                 return f"Here's {metric_name} by {dimension_name}:"
         
         if config.type == "scatter":
@@ -413,6 +424,74 @@ class SmartRenderService:
         ]
         question_lower = question.lower()
         return any(keyword in question_lower for keyword in proportion_keywords)
+
+    def _wants_two_metrics(self, question: str) -> bool:
+        """
+        True when the user explicitly asks for both a count-like metric and a revenue-like metric.
+        """
+        q = (question or "").lower()
+        wants_orders = any(kw in q for kw in ["how many", "order count", "orders", "count", "number of"])
+        wants_revenue = any(kw in q for kw in ["revenue", "sales", "amount", "aed"])
+        return wants_orders and wants_revenue
+
+    def _extract_order_type_mentions(self, question: str) -> set[str]:
+        q = (question or "").lower()
+        mentions: set[str] = set()
+
+        if re.search(r"\bgift\s*cards?\b", q) or re.search(r"\bgift[_-]?cards?\b", q) or re.search(
+            r"\bgiftcards?\b", q
+        ):
+            mentions.add("gift_card")
+
+        if re.search(r"\bmerch(?:andise)?\b", q):
+            mentions.add("merchandise")
+
+        return mentions
+
+    def _maybe_zero_fill_order_type(
+        self, df: pd.DataFrame, config: ChartConfig, question: str
+    ) -> Tuple[pd.DataFrame, List[str]]:
+        warnings: List[str] = []
+
+        if not question or config.type in ("metric", "table"):
+            return df, warnings
+
+        if not config.x_column or config.x_column != "order_type":
+            return df, warnings
+
+        mentions = self._extract_order_type_mentions(question)
+        expected = {"gift_card", "merchandise"}
+        if not (mentions.issuperset(expected)):
+            return df, warnings
+
+        if "order_type" not in df.columns:
+            return df, warnings
+
+        try:
+            existing = set(df["order_type"].astype(str).str.strip().str.lower().tolist())
+        except Exception:
+            existing = set(str(v).strip().lower() for v in list(df["order_type"]))
+
+        missing = expected - existing
+        if not missing:
+            return df, warnings
+
+        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        for missing_value in sorted(missing):
+            row: Dict[str, Any] = {"order_type": missing_value}
+            for col in numeric_cols:
+                row[col] = 0
+            if config.y_column and config.y_column in df.columns:
+                row[config.y_column] = 0
+            if config.secondary_y_column and config.secondary_y_column in df.columns:
+                row[config.secondary_y_column] = 0
+
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+            warnings.append(
+                f"Added missing order_type category '{missing_value}' with 0 to match the question."
+            )
+
+        return df, warnings
 
     def _choose_primary_and_secondary_metric(
         self, question: str, numeric_cols: List[str]
@@ -542,13 +621,14 @@ class SmartRenderService:
         value_col = config.y_column
         
         # Check if data needs aggregation
-        # If every row has a unique label, data is NOT aggregated
         unique_labels = df[label_col].nunique()
-        is_aggregated = unique_labels < len(df)
+        needs_aggregation = unique_labels < len(df)
         
-        if not is_aggregated and pd.api.types.is_numeric_dtype(df[value_col]):
+        if needs_aggregation and pd.api.types.is_numeric_dtype(df[value_col]):
             # Data needs aggregation - likely raw transactions
-            warnings.append(f"Auto-aggregated {len(df)} raw transactions")
+            warnings.append(
+                f"Auto-aggregated {len(df)} rows into {unique_labels} groups by {label_col}."
+            )
             
             # Aggregate all numeric columns
             agg_cols = [value_col]
