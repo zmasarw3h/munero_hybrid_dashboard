@@ -202,6 +202,10 @@ class TestLLMServicePostgresSafety(unittest.TestCase):
         self.assertIn("GROUP BY 1", prompt)
         self.assertIn("client_name ILIKE '%loylogic%'", prompt)
         self.assertIn(f"WHERE {self.llm_service.FILTER_PLACEHOLDER_TOKEN}", prompt)
+        self.assertIn("gift_card", prompt)
+        self.assertIn("merchandise", prompt)
+        self.assertNotIn("gift_cards", prompt)
+        self.assertNotIn("vouchers", prompt)
 
     def test_build_sql_prompt_sqlite_avoids_postgres_functions(self):
         settings = self.llm_service.settings

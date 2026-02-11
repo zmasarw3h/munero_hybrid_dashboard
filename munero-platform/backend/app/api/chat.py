@@ -37,7 +37,7 @@ from app.core.logging_utils import (
 )
 from app.core.export_tokens import ExportTokenError, make_export_token, verify_export_token
 from app.core.database import engine, execute_query_df
-from app.sql_rewrite import maybe_broaden_client_name_equals_to_contains
+from app.sql_rewrite import maybe_broaden_client_name_equals_to_contains, rewrite_order_type_literals
 
 
 router = APIRouter()
@@ -248,6 +248,8 @@ def chat_with_data(request: ChatRequest):
         try:
             sql_template = llm_service.generate_sql(request.message, filters)
             sql_query, sql_params = llm_service.inject_filters_into_sql(sql_template, filters)
+            sql_query, norm_warnings = rewrite_order_type_literals(sql_query)
+            warnings.extend(norm_warnings)
             logger.info("✅ [%s] SQL generated (%s)", correlation_id, redact_sql_for_log(sql_query))
             if debug_log_prompts:
                 logger.debug(
@@ -463,6 +465,8 @@ def chat_with_data(request: ChatRequest):
                             db_error=(dbapi_message or "Database execution error"),
                         )
                         repaired_query, repaired_params = llm_service.inject_filters_into_sql(repaired_template, filters)
+                        repaired_query, norm_warnings = rewrite_order_type_literals(repaired_query)
+                        warnings.extend(norm_warnings)
                         validate_sql_safety(repaired_query)
 
                         sql_query = repaired_query

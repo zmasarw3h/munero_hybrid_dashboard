@@ -139,6 +139,9 @@ export function ChatChart({ config, data }: ChatChartProps) {
     // Bar Chart
     if (config.type === 'bar') {
         const isHorizontal = config.orientation === 'horizontal';
+        const primaryKey = config.y_column || 'value';
+        const secondaryKey = config.secondary_y_column;
+        const showLegend = Boolean(secondaryKey);
 
         if (isHorizontal) {
             return (
@@ -158,7 +161,11 @@ export function ChatChart({ config, data }: ChatChartProps) {
                             tickFormatter={(value: string) => value.length > 15 ? value.slice(0, 15) + '...' : value}
                         />
                         <Tooltip content={<CustomTooltip />} />
-                        <Bar dataKey={config.y_column || 'value'} fill="#3b82f6" radius={[0, 4, 4, 0]} />
+                        {showLegend && <Legend />}
+                        <Bar dataKey={primaryKey} fill="#3b82f6" radius={[0, 4, 4, 0]} />
+                        {secondaryKey && (
+                            <Bar dataKey={secondaryKey} fill="#10b981" radius={[0, 4, 4, 0]} />
+                        )}
                     </BarChart>
                 </ResponsiveContainer>
             );
@@ -175,7 +182,11 @@ export function ChatChart({ config, data }: ChatChartProps) {
                     />
                     <YAxis tickFormatter={formatNumber} tick={{ fontSize: 10 }} />
                     <Tooltip content={<CustomTooltip />} />
-                    <Bar dataKey={config.y_column || 'value'} fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                    {showLegend && <Legend />}
+                    <Bar dataKey={primaryKey} fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                    {secondaryKey && (
+                        <Bar dataKey={secondaryKey} fill="#10b981" radius={[4, 4, 0, 0]} />
+                    )}
                 </BarChart>
             </ResponsiveContainer>
         );

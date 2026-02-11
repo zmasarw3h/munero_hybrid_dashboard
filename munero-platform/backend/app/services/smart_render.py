@@ -116,100 +116,135 @@ class SmartRenderService:
                 orientation="vertical"
             )
         
-        # --- Determine label and value columns ---
-        label_col = str(non_numeric_cols[0]) if non_numeric_cols else str(df.columns[0])
-        value_col = str(numeric_cols[0])
-        secondary_value_col = str(numeric_cols[1]) if len(numeric_cols) >= 2 else None
-        
+        # --- Determine label + metric columns ---
+        label_col = str(non_numeric_cols[0]) if non_numeric_cols else None
+        primary_metric, secondary_metric = self._choose_primary_and_secondary_metric(
+            question, [str(c) for c in numeric_cols]
+        )
+
         # --- Check for user explicit chart type request ---
         user_viz_type = self._detect_user_preference(question)
-        
-        # --- Case 4: Scatter Plot (2+ numeric columns) ---
-        if user_viz_type == "scatter" or (
-            user_viz_type is None and 
-            secondary_value_col is not None and 
-            len(df) > 1
-        ):
-            title = self._generate_title(question, "scatter", value_col, secondary_value_col)
+        if user_viz_type == "table":
             return ChartConfig(
-                type="scatter",
-                x_column=value_col,
-                y_column=secondary_value_col,
+                type="table",
+                title="Query Results",
+                x_column=None,
+                y_column=None,
                 secondary_y_column=None,
                 orientation="vertical",
-                title=title
             )
-        
-        # --- Case 5: Time Series Detection → Line Chart ---
+
+        # --- Scatter Plot ---
+        # Only choose scatter when explicitly requested, or when there is no suitable label axis.
+        if len(numeric_cols) >= 2 and len(df) > 1:
+            if user_viz_type == "scatter" or (user_viz_type is None and label_col is None):
+                title = self._generate_title(question, "scatter", primary_metric, secondary_metric)
+                return ChartConfig(
+                    type="scatter",
+                    x_column=primary_metric,
+                    y_column=secondary_metric,
+                    secondary_y_column=None,
+                    orientation="vertical",
+                    title=title,
+                )
+
+        if label_col is None:
+            return ChartConfig(
+                type="table",
+                title="Query Results",
+                x_column=None,
+                y_column=None,
+                secondary_y_column=None,
+                orientation="vertical",
+            )
+
+        # --- Time Series Detection ---
         is_time_series = self._is_time_series_column(label_col, df)
-        
+
+        # --- Categories for label-based charts ---
+        unique_values = df[label_col].nunique()
+        if unique_values > self.config["bar_chart_max_categories"]:
+            return ChartConfig(
+                type="table",
+                title="Query Results",
+                x_column=None,
+                y_column=None,
+                secondary_y_column=None,
+                orientation="vertical",
+            )
+
+        # --- 2-metric breakdowns (label + 2 numeric metrics) ---
+        if secondary_metric is not None:
+            if user_viz_type == "line" or (user_viz_type is None and is_time_series):
+                title = self._generate_title(question, "line", label_col, primary_metric)
+                return ChartConfig(
+                    type="line",
+                    x_column=label_col,
+                    y_column=primary_metric,
+                    secondary_y_column=secondary_metric,
+                    orientation="vertical",
+                    title=title,
+                )
+
+            # Prefer bar (grouped/dual-series) when label axis is categorical.
+            max_label_length = df[label_col].astype(str).str.len().max()
+            orientation: Literal["horizontal", "vertical"] = (
+                "horizontal" if max_label_length > self.config["long_label_threshold"] else "vertical"
+            )
+            title = self._generate_title(question, "bar", label_col, primary_metric)
+            return ChartConfig(
+                type="bar",
+                x_column=label_col,
+                y_column=primary_metric,
+                secondary_y_column=secondary_metric,
+                orientation=orientation,
+                title=title,
+            )
+
+        # --- Single-metric label-based charts ---
         if user_viz_type == "line" or (user_viz_type is None and is_time_series):
-            title = self._generate_title(question, "line", label_col, value_col)
+            title = self._generate_title(question, "line", label_col, primary_metric)
             return ChartConfig(
                 type="line",
                 x_column=label_col,
-                y_column=value_col,
+                y_column=primary_metric,
                 secondary_y_column=None,
                 orientation="vertical",
-                title=title
+                title=title,
             )
-        
-        # --- Case 6: Pie Chart (few categories) ---
-        unique_values = df[label_col].nunique()
-        
-        if user_viz_type == "pie" or (
-            user_viz_type is None and 
-            unique_values <= self.config["pie_chart_max_slices"] and
-            unique_values >= 2 and
-            self._looks_like_proportion_query(question)
-        ):
-            title = self._generate_title(question, "pie", label_col, value_col)
-            return ChartConfig(
-                type="pie",
-                x_column=label_col,  # names/labels
-                y_column=value_col,   # values
-                secondary_y_column=None,
-                orientation="vertical",
-                title=title
-            )
-        
-        # --- Case 7: Too many categories for chart → Table ---
-        if unique_values > self.config["bar_chart_max_categories"]:
-            return ChartConfig(
-                type="table", 
-                title="Query Results",
-                x_column=None,
-                y_column=None,
-                secondary_y_column=None,
-                orientation="vertical"
-            )
-        
-        # --- Case 8: User explicitly wants table ---
-        if user_viz_type == "table":
-            return ChartConfig(
-                type="table", 
-                title="Query Results",
-                x_column=None,
-                y_column=None,
-                secondary_y_column=None,
-                orientation="vertical"
-            )
-        
+
+        # Pie should only be considered when there is exactly 1 numeric metric column.
+        if len(numeric_cols) == 1:
+            if user_viz_type == "pie" or (
+                user_viz_type is None
+                and unique_values <= self.config["pie_chart_max_slices"]
+                and unique_values >= 2
+                and self._looks_like_proportion_query(question)
+            ):
+                title = self._generate_title(question, "pie", label_col, primary_metric)
+                return ChartConfig(
+                    type="pie",
+                    x_column=label_col,  # names/labels
+                    y_column=primary_metric,  # values
+                    secondary_y_column=None,
+                    orientation="vertical",
+                    title=title,
+                )
+
         # --- Default: Bar Chart ---
-        # Detect long labels for horizontal orientation
         max_label_length = df[label_col].astype(str).str.len().max()
         orientation: Literal["horizontal", "vertical"] = (
             "horizontal" if max_label_length > self.config["long_label_threshold"] else "vertical"
         )
-        
-        title = self._generate_title(question, "bar", label_col, value_col)
+
+        title = self._generate_title(question, "bar", label_col, primary_metric)
         return ChartConfig(
             type="bar",
             x_column=label_col,
-            y_column=value_col,
+            y_column=primary_metric,
             secondary_y_column=None,
             orientation=orientation,
-            title=title
+            title=title,
         )
     
     def prepare_data_for_chart(
@@ -378,7 +413,60 @@ class SmartRenderService:
         ]
         question_lower = question.lower()
         return any(keyword in question_lower for keyword in proportion_keywords)
-    
+
+    def _choose_primary_and_secondary_metric(
+        self, question: str, numeric_cols: List[str]
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Choose primary/secondary metrics for multi-metric results.
+
+        Rules:
+        - If the question implies count/orders/"how many", prefer an orders-like column as primary.
+        - If the question implies revenue/sales/amount/AED, prefer a revenue-like column as primary.
+        - Otherwise prefer revenue-like if present; else first numeric.
+        """
+        if not numeric_cols:
+            return "value", None
+
+        q = (question or "").lower()
+        prefers_orders = any(kw in q for kw in ["how many", "count", "number of", "orders", "order count"])
+        prefers_revenue = any(kw in q for kw in ["revenue", "sales", "amount", "aed"])
+
+        def _tokens(col: str) -> List[str]:
+            return [t for t in re.split(r"[_\s-]+", (col or "").lower()) if t]
+
+        def _find_first(pred) -> Optional[str]:
+            for col in numeric_cols:
+                if pred(col):
+                    return col
+            return None
+
+        orders_col = _find_first(
+            lambda c: ("orders" in _tokens(c)) or ("order" in _tokens(c) and "count" in _tokens(c))
+        )
+        revenue_col = _find_first(
+            lambda c: any(t in _tokens(c) for t in ["revenue", "sales", "amount", "aed", "price"])
+        )
+
+        primary = numeric_cols[0]
+        if prefers_orders and orders_col:
+            primary = orders_col
+        elif prefers_revenue and revenue_col:
+            primary = revenue_col
+        else:
+            primary = revenue_col or numeric_cols[0]
+
+        secondary: Optional[str] = None
+        if len(numeric_cols) >= 2:
+            if primary == orders_col and revenue_col and revenue_col != primary:
+                secondary = revenue_col
+            elif primary == revenue_col and orders_col and orders_col != primary:
+                secondary = orders_col
+            else:
+                secondary = next((c for c in numeric_cols if c != primary), None)
+
+        return primary, secondary
+
     def _format_column_title(self, col_name: str) -> str:
         """Format a column name as a readable title."""
         return col_name.replace("_", " ").replace("-", " ").title()

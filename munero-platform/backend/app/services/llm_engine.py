@@ -332,7 +332,7 @@ KEY COLUMNS:
 - product_name: Product name (TEXT)
 - product_brand: Product brand (TEXT, e.g., 'Apple', 'Amazon', 'Google')
 - product_sku: Product SKU (TEXT)
-- order_type: Product category/type (TEXT, e.g., 'gift_cards', 'vouchers')
+- order_type: One of 'gift_card' or 'merchandise' (TEXT; exact values; lowercase; singular)
 - supplier_name: Supplier name (TEXT)
 - is_test: Test flag (INTEGER: 0=real, 1=test)
 
@@ -692,7 +692,7 @@ MUNERO BUSINESS CONTEXT:
 - Negative margins indicate unprofitable client/supplier relationships
 - AOV (Average Order Value) patterns reveal client purchasing behavior
 - Market share concentration shows dependency risks
-- Product types: gift_cards, vouchers, etc.
+- Product types: gift_card, merchandise
 
 Summary:"""
         

@@ -396,7 +396,7 @@ Product Information:
   - product_brand (TEXT): Product brand (e.g., 'Apple', 'Amazon', 'Google')
   - product_sku (TEXT): Product SKU code
   - product_id (INTEGER): Internal product ID
-  - order_type (TEXT): Product category/type (e.g., 'gift_cards', 'merchandise', 'vouchers')
+  - order_type (TEXT): One of 'gift_card' or 'merchandise' (exact values; lowercase; singular).
 
 Supplier Information:
   - supplier_name (TEXT): Supplier name
@@ -627,6 +627,19 @@ CLIENT NAME MATCHING (Important):
 - If the user provides a partial client name, prefer a case-insensitive substring match instead of exact equality.
   Example: {client_name_contains_example}
 
+ORDER TYPE VALUES (Important):
+-----------------------------
+- When filtering by order_type, only use the exact schema values (lowercase singular):
+  - 'gift_card'
+  - 'merchandise'
+
+BREAKDOWNS / VS / SPLIT QUERIES (Important):
+-------------------------------------------
+- If the question implies a split/breakdown/vs/compare across a dimension (e.g. by order_type), return BOTH:
+  - COUNT(DISTINCT order_number) AS orders
+  - {round_revenue_sum_expr} AS total_revenue
+  and GROUP BY the requested dimension (use positional refs like GROUP BY 1).
+
 CRITICAL SQL RULES:
 -------------------
 1. fact_orders is DENORMALIZED - NO JOINS needed for most queries!
@@ -670,6 +683,16 @@ A: SELECT {order_date_expr} as order_date, {round_revenue_sum_expr} as revenue
      AND {order_date_expr} BETWEEN '2025-06-01' AND '2025-06-30'
    GROUP BY 1
    ORDER BY 1;
+
+Q: "What is the split of gift cards vs merchandise?"
+A: SELECT order_type,
+          COUNT(DISTINCT order_number) AS orders,
+          {round_revenue_sum_expr} AS total_revenue
+   FROM fact_orders
+   WHERE {FILTER_PLACEHOLDER_TOKEN}
+     AND order_type IN ('gift_card', 'merchandise')
+   GROUP BY 1
+   ORDER BY total_revenue DESC;
 
 Q: "What is total revenue?"
 A: SELECT {round_revenue_sum_expr} as total_revenue 
@@ -875,6 +898,17 @@ CLIENT NAME MATCHING (Important):
 - Client names are often longer than what the user types (e.g. "Loylogic Rewards FZE").
 - If the user provides a partial client name, prefer a case-insensitive substring match instead of exact equality.
   Example: {client_name_contains_example}
+
+ORDER TYPE VALUES (Important):
+- When filtering by order_type, only use the exact schema values (lowercase singular):
+  - 'gift_card'
+  - 'merchandise'
+
+BREAKDOWNS / VS / SPLIT QUERIES (Important):
+- If the question implies a split/breakdown/vs/compare across a dimension (e.g. by order_type), return BOTH:
+  - COUNT(DISTINCT order_number) AS orders
+  - {round_revenue_sum_expr} AS total_revenue
+  and GROUP BY the requested dimension (use positional refs like GROUP BY 1).
 
 EXECUTION ERROR (from the database):
 {db_error}
