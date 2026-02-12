@@ -26,6 +26,8 @@ interface ChatChartProps {
     data: Record<string, unknown>[];
 }
 
+type AugmentedScatterRow = Record<string, unknown> & { __rank: number; __label: string };
+
 const TABLE_ROW_LIMIT = 10;
 const DUAL_AXIS_BAR_CHART_LIMIT = 5;
 
@@ -62,6 +64,134 @@ function formatCategoryLabel(value: unknown): string {
 
 function truncateLabel(value: string, maxLength: number): string {
     return value.length > maxLength ? value.slice(0, maxLength) + '...' : value;
+}
+
+function formatCellValue(value: unknown): string {
+    if (typeof value === 'number') return formatNumber(value);
+    return String(value ?? '');
+}
+
+function inferScatterLabelKey(
+    rows: Record<string, unknown>[],
+    xKey?: string,
+    yKey?: string
+): string | null {
+    if (!rows.length) return null;
+
+    const excluded = new Set([xKey, yKey].filter(Boolean) as string[]);
+    const candidateKeys = Object.keys(rows[0] || {}).filter((key) => !excluded.has(key));
+
+    const tokenWeights: Array<{ token: string; weight: number }> = [
+        { token: 'client_name', weight: 120 },
+        { token: 'product_name', weight: 115 },
+        { token: 'supplier_name', weight: 110 },
+        { token: 'brand_name', weight: 105 },
+        { token: 'country', weight: 95 },
+        { token: 'category', weight: 90 },
+        { token: 'name', weight: 80 },
+        { token: 'client', weight: 60 },
+        { token: 'supplier', weight: 55 },
+        { token: 'product', weight: 50 },
+        { token: 'brand', weight: 45 },
+    ];
+
+    function hasUsableStringValues(key: string): boolean {
+        for (let i = 0; i < Math.min(rows.length, 15); i++) {
+            const value = rows[i]?.[key];
+            if (typeof value === 'string' && value.trim().length > 0) return true;
+        }
+        return false;
+    }
+
+    function scoreKey(key: string): number {
+        const name = key.toLowerCase();
+        let score = 0;
+        for (const { token, weight } of tokenWeights) {
+            if (name.includes(token)) score += weight;
+        }
+        if (name.includes('id') || name.includes('uuid') || name.includes('code')) score -= 80;
+        return score;
+    }
+
+    const scored = candidateKeys
+        .filter(hasUsableStringValues)
+        .map((key) => ({ key, score: scoreKey(key) }))
+        .sort((a, b) => b.score - a.score);
+
+    return scored[0]?.key ?? null;
+}
+
+function ScatterTooltip({
+    active,
+    payload,
+    labelKey,
+    xKey,
+    yKey,
+}: {
+    active?: boolean;
+    payload?: Array<{ payload?: Record<string, unknown> }>;
+    labelKey: string | null;
+    xKey: string;
+    yKey: string;
+}) {
+    if (!active || !payload?.length) return null;
+    const row = payload[0]?.payload;
+    if (!row) return null;
+
+    const rank = row.__rank;
+    const labelValue = labelKey ? row[labelKey] : null;
+
+    return (
+        <div className="bg-background border border-border rounded-md shadow-lg p-2 text-xs">
+            <div className="flex items-baseline justify-between gap-3 mb-1">
+                {labelKey && labelValue != null && String(labelValue).trim() !== '' && (
+                    <p className="font-medium">{formatCategoryLabel(labelValue)}</p>
+                )}
+                {typeof rank === 'number' && (
+                    <p className="text-muted-foreground">#{rank}</p>
+                )}
+            </div>
+            <p>{formatKeyLabel(xKey)}: {formatCellValue(row[xKey])}</p>
+            <p>{formatKeyLabel(yKey)}: {formatCellValue(row[yKey])}</p>
+        </div>
+    );
+}
+
+function NumberedScatterDot({
+    cx,
+    cy,
+    fill,
+    payload,
+}: {
+    cx?: number;
+    cy?: number;
+    fill?: string;
+    payload?: Record<string, unknown>;
+}) {
+    if (cx == null || cy == null) return null;
+    const rank = payload?.__rank;
+    const label = payload?.__label;
+    const shouldShowNumber = typeof rank === 'number' && typeof label === 'string' && label.trim() !== '';
+
+    const radius = shouldShowNumber ? 7 : 6;
+    return (
+        <g>
+            <circle cx={cx} cy={cy} r={radius} fill={fill || '#3b82f6'} />
+            {shouldShowNumber && (
+                <text
+                    x={cx}
+                    y={cy}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fontSize={9}
+                    fontWeight={600}
+                    fill="#ffffff"
+                >
+                    {String(rank)}
+                </text>
+            )}
+        </g>
+    );
 }
 
 // Format large numbers
@@ -439,32 +569,104 @@ export function ChatChart({ config, data }: ChatChartProps) {
 
     // Scatter Chart
     if (config.type === 'scatter') {
+        const xKey = config.x_column || 'x';
+        const yKey = config.y_column || 'y';
+        const labelKey = inferScatterLabelKey(data, xKey, yKey);
+        const scatterData: AugmentedScatterRow[] = data.map((row, idx) => ({
+            ...row,
+            __rank: idx + 1,
+            __label: labelKey ? String(row[labelKey] ?? '') : '',
+        }));
+
         return (
-            <ResponsiveContainer width="100%" height={200}>
-                <ScatterChart margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis
-                        type="number"
-                        dataKey={config.x_column}
-                        name={config.x_column}
-                        tickFormatter={formatNumber}
-                        tick={{ fontSize: 10 }}
-                    />
-                    <YAxis
-                        type="number"
-                        dataKey={config.y_column}
-                        name={config.y_column}
-                        tickFormatter={formatNumber}
-                        tick={{ fontSize: 10 }}
-                    />
-                    <Tooltip cursor={{ strokeDasharray: '3 3' }} content={<CustomTooltip />} />
-                    <Scatter data={data} fill="#3b82f6">
-                        {data.map((_, index) => (
-                            <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
-                        ))}
-                    </Scatter>
-                </ScatterChart>
-            </ResponsiveContainer>
+            <div className="space-y-3">
+                <ResponsiveContainer width="100%" height={200}>
+                    <ScatterChart margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis
+                            type="number"
+                            dataKey={xKey}
+                            name={xKey}
+                            tickFormatter={formatNumber}
+                            tick={{ fontSize: 10 }}
+                        />
+                        <YAxis
+                            type="number"
+                            dataKey={yKey}
+                            name={yKey}
+                            tickFormatter={formatNumber}
+                            tick={{ fontSize: 10 }}
+                        />
+                        <Tooltip
+                            cursor={{ strokeDasharray: '3 3' }}
+                            content={<ScatterTooltip labelKey={labelKey} xKey={xKey} yKey={yKey} />}
+                        />
+                        <Scatter
+                            data={scatterData}
+                            fill="#3b82f6"
+                            shape={(props: unknown) => {
+                                const dot = props as unknown as {
+                                    cx?: number;
+                                    cy?: number;
+                                    fill?: string;
+                                    payload?: Record<string, unknown>;
+                                };
+                                return (
+                                    <NumberedScatterDot
+                                        cx={dot.cx}
+                                        cy={dot.cy}
+                                        fill={dot.fill}
+                                        payload={dot.payload}
+                                    />
+                                );
+                            }}
+                        >
+                            {scatterData.map((_, index) => (
+                                <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+                            ))}
+                        </Scatter>
+                    </ScatterChart>
+                </ResponsiveContainer>
+
+                {labelKey && (
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                            <thead>
+                                <tr className="border-b">
+                                    <th className="text-left p-2 font-medium text-muted-foreground">#</th>
+                                    <th className="text-left p-2 font-medium text-muted-foreground">
+                                        {formatKeyLabel(labelKey)}
+                                    </th>
+                                    <th className="text-left p-2 font-medium text-muted-foreground">
+                                        {formatKeyLabel(xKey)}
+                                    </th>
+                                    <th className="text-left p-2 font-medium text-muted-foreground">
+                                        {formatKeyLabel(yKey)}
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {scatterData.map((row, idx) => (
+                                    <tr key={idx} className="border-b last:border-0">
+                                        <td className="p-2 text-muted-foreground">
+                                            {typeof row.__rank === 'number' ? row.__rank : idx + 1}
+                                        </td>
+                                        <td className="p-2">
+                                            {formatCategoryLabel(row.__label)}
+                                        </td>
+                                        <td className="p-2">
+                                            {formatCellValue(row[xKey])}
+                                        </td>
+                                        <td className="p-2">
+                                            {formatCellValue(row[yKey])}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </div>
         );
     }
 

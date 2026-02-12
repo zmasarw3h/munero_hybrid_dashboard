@@ -334,6 +334,99 @@ class TestSmartRender(unittest.TestCase):
         self.assertEqual(warnings, ["Auto-aggregated 3 rows into 2 groups by order_type."])
         self.assertEqual(len(out_df), 2)
 
+    def test_dual_metric_horizontal_bar_limits_table_rows_by_top_n(self):
+        service = self.smart_render.SmartRenderService()
+        config = self.smart_render.ChartConfig(
+            type="bar",
+            x_column="supplier_name",
+            y_column="orders",
+            secondary_y_column="total_revenue",
+            orientation="horizontal",
+            title="test",
+        )
+
+        self.assertEqual(
+            service._determine_display_row_limit(config, "Top 5 suppliers by orders and revenue"),
+            5,
+        )
+        self.assertEqual(
+            service._determine_display_row_limit(config, "Top 15 suppliers by orders and revenue"),
+            10,
+        )
+        self.assertEqual(
+            service._determine_display_row_limit(config, "Suppliers by orders and revenue"),
+            10,
+        )
+
+    def test_dual_metric_prefers_sorting_by_revenue(self):
+        service = self.smart_render.SmartRenderService()
+        config = self.smart_render.ChartConfig(
+            type="bar",
+            x_column="supplier_name",
+            y_column="orders",
+            secondary_y_column="total_revenue",
+            orientation="horizontal",
+            title="test",
+        )
+        self.assertEqual(service._pick_preferred_sort_metric(config), "total_revenue")
+
+    def test_scatter_limits_rows_by_top_n(self):
+        service = self.smart_render.SmartRenderService()
+        config = self.smart_render.ChartConfig(
+            type="scatter",
+            x_column="orders",
+            y_column="total_revenue",
+            secondary_y_column=None,
+            orientation="vertical",
+            title="test",
+        )
+
+        self.assertEqual(
+            service._determine_display_row_limit(config, "Top 5 clients by orders vs revenue"),
+            5,
+        )
+        self.assertEqual(
+            service._determine_display_row_limit(config, "Top 50 clients by orders vs revenue"),
+            15,
+        )
+        self.assertEqual(
+            service._determine_display_row_limit(config, "Orders vs revenue by client"),
+            15,
+        )
+
+    def test_scatter_prepare_data_does_not_auto_aggregate_by_metric(self):
+        # The test harness can stub pandas; only run this when real pandas is available
+        # to avoid relying on methods not implemented in the stub DataFrame.
+        if not hasattr(self.smart_render.pd, "__version__"):
+            self.skipTest("Requires real pandas.")
+
+        df = self.smart_render.pd.DataFrame(
+            {
+                "client_name": ["A", "B", "C"],
+                "orders": [4, 4, 5],
+                "total_revenue": [100.0, 50.0, 75.0],
+            }
+        )
+
+        service = self.smart_render.SmartRenderService()
+        config = self.smart_render.ChartConfig(
+            type="scatter",
+            x_column="orders",
+            y_column="total_revenue",
+            secondary_y_column=None,
+            orientation="vertical",
+            title="test",
+        )
+
+        data, warnings = service.prepare_data_for_chart(
+            df,
+            config,
+            "Show a scatter plot of orders vs revenue by client",
+        )
+        self.assertTrue(all("Auto-aggregated" not in warning for warning in warnings))
+        self.assertTrue(data)
+        self.assertIn("client_name", data[0])
+
 
 if __name__ == "__main__":
     unittest.main()

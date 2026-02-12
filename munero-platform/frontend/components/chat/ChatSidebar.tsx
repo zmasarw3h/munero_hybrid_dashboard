@@ -230,7 +230,6 @@ export function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
                         <ChatMessage
                             key={msg.id}
                             message={msg}
-                            onFollowUp={msg.role === 'assistant' ? handleSend : undefined}
                         />
                     ))}
 

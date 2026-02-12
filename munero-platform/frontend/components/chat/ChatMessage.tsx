@@ -10,10 +10,9 @@ import { apiClient } from '@/lib/api-client';
 
 interface ChatMessageProps {
     message: ChatMessageType;
-    onFollowUp?: (question: string) => void;
 }
 
-export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
+export function ChatMessage({ message }: ChatMessageProps) {
     const [sqlExpanded, setSqlExpanded] = useState(false);
     const [copied, setCopied] = useState(false);
     const [isExporting, setIsExporting] = useState(false);
@@ -227,29 +226,6 @@ export function ChatMessage({ message, onFollowUp }: ChatMessageProps) {
                     </p>
                 )}
 
-                {/* Follow-up suggestions */}
-                {onFollowUp && response && !response.error && response.row_count > 0 && (
-                    <div className="flex flex-wrap gap-1.5 pt-1">
-                        <button
-                            onClick={() => onFollowUp("Show me the trend over time")}
-                            className="text-xs px-2 py-1 rounded-full bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-950/50 transition-colors"
-                        >
-                            Show trend
-                        </button>
-                        <button
-                            onClick={() => onFollowUp("Break this down by category")}
-                            className="text-xs px-2 py-1 rounded-full bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-950/50 transition-colors"
-                        >
-                            By category
-                        </button>
-                        <button
-                            onClick={() => onFollowUp("Compare to last period")}
-                            className="text-xs px-2 py-1 rounded-full bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-950/50 transition-colors"
-                        >
-                            Compare
-                        </button>
-                    </div>
-                )}
             </div>
             <span className="text-xs text-muted-foreground mt-1">{formattedTime}</span>
         </div>

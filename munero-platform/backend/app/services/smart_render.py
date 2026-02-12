@@ -329,7 +329,9 @@ class SmartRenderService:
         df_viz = df.copy()
         
         # --- Handle aggregation if needed ---
-        if config.x_column and config.y_column and config.type not in ("metric", "table"):
+        # Scatter plots represent relationships between numeric metrics and should not be auto-aggregated,
+        # otherwise label columns (e.g., client_name) can be collapsed/dropped.
+        if config.x_column and config.y_column and config.type not in ("metric", "table", "scatter"):
             df_viz, agg_warnings = self._maybe_aggregate(df_viz, config)
             warnings.extend(agg_warnings)
 
@@ -353,10 +355,8 @@ class SmartRenderService:
         
         # --- Limit rows for display (except time series) ---
         is_time_series = config.type == "line"
-        
-        max_rows = (
-            self.config["max_table_rows"] if config.type == "table" else self.config["max_display_rows"]
-        )
+
+        max_rows = self._determine_display_row_limit(config, question)
         if not is_time_series and len(df_viz) > max_rows:
             original_count = len(df_viz)
             df_viz = df_viz.head(max_rows)
@@ -367,6 +367,24 @@ class SmartRenderService:
         
         # --- Clean data (remove NaN for charts) ---
         if config.type != "table":
+            # Be tolerant of sparse results: keep rows by filling missing labels/metrics when possible.
+            if config.type in ("bar", "pie") and config.x_column and config.x_column in df_viz.columns:
+                try:
+                    if df_viz[config.x_column].isnull().any():
+                        df_viz = df_viz.copy()
+                        df_viz[config.x_column] = df_viz[config.x_column].fillna("(Unknown)")
+                except Exception:
+                    pass
+
+            for metric_col in [config.y_column, config.secondary_y_column]:
+                if metric_col and metric_col in df_viz.columns:
+                    try:
+                        if pd.api.types.is_numeric_dtype(df_viz[metric_col]) and df_viz[metric_col].isnull().any():
+                            df_viz = df_viz.copy()
+                            df_viz[metric_col] = df_viz[metric_col].fillna(0)
+                    except Exception:
+                        pass
+
             cols_to_check = [c for c in [config.x_column, config.y_column, config.secondary_y_column] if c]
             if cols_to_check:
                 df_viz = df_viz.dropna(subset=[c for c in cols_to_check if c in df_viz.columns])
@@ -814,6 +832,15 @@ class SmartRenderService:
         
         label_col = config.x_column
         value_col = config.y_column
+
+        # Avoid treating NULL label values as "duplicates" (pandas nunique() drops NaNs by default),
+        # which can trigger bogus aggregation and drop rows via groupby.
+        try:
+            if df[label_col].isnull().any():
+                df = df.copy()
+                df[label_col] = df[label_col].fillna("(Unknown)")
+        except Exception:
+            pass
         
         # Check if data needs aggregation
         unique_labels = df[label_col].nunique()
@@ -852,13 +879,103 @@ class SmartRenderService:
             except Exception:
                 pass
         elif config.type in ("bar", "pie") and config.y_column:
-            # Bar/Pie: sort by value descending
+            # Bar/Pie: sort by value descending (prefer revenue for 2-metric breakdowns)
             try:
-                df = df.sort_values(by=config.y_column, ascending=False)
+                sort_col = config.y_column
+                preferred = self._pick_preferred_sort_metric(config)
+                if preferred and preferred in df.columns:
+                    sort_col = preferred
+                df = df.sort_values(by=sort_col, ascending=False)
+            except Exception:
+                pass
+        elif config.type == "scatter" and config.x_column and config.y_column:
+            # Scatter: when truncating to max_display_rows, keep the "most important" points.
+            # Prefer revenue-like metrics; otherwise sort by y_column descending.
+            def _is_revenue_like(col: str) -> bool:
+                tokens = set(re.split(r"[_\s-]+", (col or "").lower()))
+                return bool(tokens & {"revenue", "sales", "amount", "aed"})
+
+            try:
+                sort_col = (
+                    config.x_column
+                    if _is_revenue_like(config.x_column)
+                    else (config.y_column if _is_revenue_like(config.y_column) else config.y_column)
+                )
+                df = df.sort_values(by=sort_col, ascending=False)
             except Exception:
                 pass
         
         return df
+
+    def _extract_requested_top_n(self, question: str) -> int | None:
+        match = re.search(r"\btop\s+(\d{1,4})\b", (question or "").lower())
+        if not match:
+            return None
+        try:
+            n = int(match.group(1))
+        except Exception:
+            return None
+        return n if n > 0 else None
+
+    def _determine_display_row_limit(self, config: ChartConfig, question: str) -> int:
+        """
+        Decide how many rows to include in `data` for frontend rendering.
+
+        Defaults:
+        - Tables: max_table_rows
+        - Charts: max_display_rows
+
+        Special-case:
+        - Dual-metric horizontal bar charts also render a table on the frontend, so cap to max_table_rows
+          and respect explicit "top N" questions up to that cap.
+        - Scatter plots respect explicit "top N" up to max_display_rows.
+        """
+        max_table_rows = int(self.config["max_table_rows"])
+        max_display_rows = int(self.config["max_display_rows"])
+
+        if config.type == "scatter":
+            requested_top_n = self._extract_requested_top_n(question)
+            if requested_top_n is None:
+                return max_display_rows
+            return min(requested_top_n, max_display_rows)
+
+        if (
+            config.type == "bar"
+            and bool(config.secondary_y_column)
+            and (config.orientation or "").lower() == "horizontal"
+        ):
+            requested_top_n = self._extract_requested_top_n(question)
+            if requested_top_n is None:
+                return max_table_rows
+            return min(requested_top_n, max_table_rows)
+
+        if config.type == "table":
+            requested_top_n = self._extract_requested_top_n(question)
+            if requested_top_n is None:
+                return max_table_rows
+            return min(requested_top_n, max_table_rows)
+
+        return max_display_rows
+
+    def _pick_preferred_sort_metric(self, config: ChartConfig) -> str | None:
+        """
+        For multi-metric results, prefer sorting by revenue over orders when both are present.
+        """
+        candidates: list[str] = []
+        if config.y_column:
+            candidates.append(str(config.y_column))
+        if config.secondary_y_column:
+            candidates.append(str(config.secondary_y_column))
+
+        def _tokens(col: str) -> list[str]:
+            return [t for t in re.split(r"[_\s-]+", (col or "").lower()) if t]
+
+        for col in candidates:
+            tokens = set(_tokens(col))
+            if tokens & {"revenue", "sales", "amount", "aed"}:
+                return col
+
+        return candidates[0] if candidates else None
     
     def _group_pie_others(
         self, 

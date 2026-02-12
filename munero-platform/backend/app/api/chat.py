@@ -910,6 +910,50 @@ def export_csv(request: ExportCSVRequest):
 
         # 5. Execute query
         df = execute_query_df(sql_query, conn=engine, params=params or None, max_rows=10000)
+
+        # 5b. Keep exports consistent with the UI for common dual-metric "top N" outputs:
+        # when both orders + revenue are present for a categorical breakdown, sort by revenue.
+        try:
+            if "orders" in df.columns and len(df) > 1:
+                revenue_col: str | None = None
+                if "total_revenue" in df.columns:
+                    revenue_col = "total_revenue"
+                else:
+                    for col in df.columns:
+                        col_lower = str(col).lower()
+                        if any(token in col_lower for token in ["revenue", "sales", "amount", "aed"]):
+                            revenue_col = str(col)
+                            break
+
+                if revenue_col is None:
+                    raise ValueError("No revenue-like column found for export sorting.")
+
+                def _looks_time_like(col_name: str) -> bool:
+                    name = (col_name or "").lower()
+                    if any(token in name for token in ["date", "day", "month", "year", "week", "quarter", "period"]):
+                        return True
+                    try:
+                        sample = df[col_name].dropna().astype(str).head(10).tolist()
+                    except Exception:
+                        return False
+                    for value in sample:
+                        if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+                            return True
+                        if re.match(r"^\d{4}-\d{2}$", value):
+                            return True
+                        if re.match(r"^\d{4}$", value):
+                            return True
+                    return False
+
+                # Detect time series even when the time column is numeric (e.g., year/month as ints).
+                is_time_series = any(_looks_time_like(str(col)) for col in df.columns)
+                if not is_time_series:
+                    if not pd.api.types.is_numeric_dtype(df[revenue_col]):
+                        df = df.copy()
+                        df[revenue_col] = pd.to_numeric(df[revenue_col], errors="coerce")
+                    df = df.sort_values(by=revenue_col, ascending=False, na_position="last")
+        except Exception:
+            pass
         
         # 6. Generate CSV content
         output = io.StringIO()
