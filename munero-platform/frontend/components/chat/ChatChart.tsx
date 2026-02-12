@@ -5,7 +5,6 @@ import { ChatChartConfig } from '@/lib/types';
 import {
     BarChart,
     Bar,
-    ComposedChart,
     LineChart,
     Line,
     PieChart,
@@ -426,7 +425,7 @@ export function ChatChart({ config, data }: ChatChartProps) {
         if (secondaryKey) {
             return (
                 <ResponsiveContainer width="100%" height={200}>
-                    <ComposedChart data={data} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+                    <BarChart data={data} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} />
                         <XAxis
                             dataKey={config.x_column}
@@ -449,17 +448,14 @@ export function ChatChart({ config, data }: ChatChartProps) {
                             fill="#3b82f6"
                             radius={[4, 4, 0, 0]}
                         />
-                        <Line
+                        <Bar
                             yAxisId="right"
-                            type="monotone"
                             dataKey={secondaryKey}
                             name={formatKeyLabel(secondaryKey)}
-                            stroke="#10b981"
-                            strokeWidth={2}
-                            dot={{ fill: '#10b981', r: 3 }}
-                            activeDot={{ r: 5 }}
+                            fill="#10b981"
+                            radius={[4, 4, 0, 0]}
                         />
-                    </ComposedChart>
+                    </BarChart>
                 </ResponsiveContainer>
             );
         }
