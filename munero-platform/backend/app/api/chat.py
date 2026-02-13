@@ -92,13 +92,17 @@ def _log_exception(
     if sql_sha:
         context_parts.append(f"sql_sha={sql_sha}")
     context_str = f" ({', '.join(context_parts)})" if context_parts else ""
+    exc_message = _redact_log_text(str(exc))
+    if isinstance(exc_message, str) and len(exc_message) > 500:
+        exc_message = exc_message[:500] + "…"
 
     logger.exception(
-        "❌ [%s] %s%s exc_type=%s",
+        "❌ [%s] %s%s exc_type=%s exc_message=%s",
         correlation_id,
         label,
         context_str,
         type(exc).__name__,
+        exc_message,
         exc_info=False,
     )
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
@@ -310,7 +314,7 @@ def chat_with_data(request: ChatRequest):
                 chart_config=None,
                 row_count=0,
                 warnings=[],
-                error="SQL generation failed."
+                error=f"SQL generation failed. (id={correlation_id})",
             )
 
         # =====================================================================

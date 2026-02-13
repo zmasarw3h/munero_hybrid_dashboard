@@ -261,6 +261,35 @@ class TestLLMServicePostgresSafety(unittest.TestCase):
         self.assertIn("FROM fact_orders", extracted)
         self.assertNotIn("extra text", extracted)
 
+    def test_generate_sql_top_clients_by_aov_sqlite_is_deterministic(self):
+        settings = self.llm_service.settings
+        settings.DB_URI = "sqlite:////tmp/munero_test.sqlite"
+
+        service = self.llm_service.LLMService()
+        sql = service.generate_sql("Top 10 clients by AOV", self.llm_service.DashboardFilters())
+
+        self.assertIn("SELECT", sql.upper())
+        self.assertIn("FROM fact_orders", sql)
+        self.assertIn("WHERE __MUNERO_FILTERS__", sql)
+        self.assertIn(" AS aov", sql)
+        self.assertIn("ORDER BY aov DESC", sql)
+        self.assertIn("LIMIT 10", sql)
+        self.assertTrue(sql.strip().endswith(";"))
+
+    def test_generate_sql_top_clients_by_aov_postgres_is_type_safe(self):
+        settings = self.llm_service.settings
+        settings.DB_URI = "postgresql+psycopg://user:pass@localhost:5432/db"
+
+        service = self.llm_service.LLMService()
+        sql = service.generate_sql("Top 10 clients by AOV", self.llm_service.DashboardFilters())
+
+        self.assertIn("FROM fact_orders", sql)
+        self.assertIn("WHERE __MUNERO_FILTERS__", sql)
+        self.assertIn("ORDER BY aov DESC", sql)
+        self.assertIn("LIMIT 10", sql)
+        self.assertIn("regexp_replace(order_price_in_aed::text", sql)
+        self.assertIn("::numeric, 2)::double precision", sql)
+
     def test_inject_filters_rejects_token_in_comment(self):
         service = self.llm_service.LLMService()
         sql = "SELECT 1 FROM fact_orders WHERE 1=1 /* __MUNERO_FILTERS__ */;"

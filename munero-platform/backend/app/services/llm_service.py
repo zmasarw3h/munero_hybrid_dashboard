@@ -572,6 +572,12 @@ FOREIGN KEY RELATIONSHIPS (for reference - usually not needed due to denormaliza
             if settings.db_dialect == "postgresql"
             else f"ROUND(SUM({revenue_expr}), 2)"
         )
+        aov_expr = f"SUM({revenue_expr}) / NULLIF(COUNT(DISTINCT order_number), 0)"
+        round_aov_expr = (
+            f"ROUND(({aov_expr})::numeric, 2)::double precision"
+            if settings.db_dialect == "postgresql"
+            else f"ROUND({aov_expr}, 2)"
+        )
 
         client_name_contains_example = (
             "client_name ILIKE '%loylogic%'"
@@ -703,6 +709,15 @@ A: SELECT order_type,
    GROUP BY 1
    ORDER BY total_revenue DESC;
 
+Q: "Top 10 clients by AOV"
+A: SELECT client_name,
+          {round_aov_expr} AS aov
+   FROM fact_orders
+   WHERE {FILTER_PLACEHOLDER_TOKEN}
+   GROUP BY 1
+   ORDER BY aov DESC
+   LIMIT 10;
+
 Q: "What is total revenue?"
 A: SELECT {round_revenue_sum_expr} as total_revenue 
    FROM fact_orders 
@@ -721,16 +736,13 @@ SQL:"""
         
         Args:
             prompt: The prompt to send to the LLM
-            
+
         Returns:
             str: The LLM response content
         """
         if self.provider != "gemini":
             raise ValueError(f"Unsupported LLM provider: {self.provider}")
-        try:
-            return self.gemini.generate_text(prompt)
-        except GeminiClientError as e:
-            raise Exception("LLM invocation failed") from e
+        return self.gemini.generate_text(prompt)
 
     def extract_sql_from_response(self, response: str) -> str:
         """
@@ -782,48 +794,99 @@ SQL:"""
     def _remove_think_tags(self, response: str) -> str:
         """
         Remove DeepSeek-R1's <think>...</think> reasoning tags from response.
-        
+
         Args:
             response: Raw LLM response
-            
+
         Returns:
             str: Response with think tags removed
         """
-        # Remove all <think> blocks (case-insensitive, multiline, greedy)
-        cleaned = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL | re.IGNORECASE)
         return cleaned.strip()
 
-    def generate_sql(
-        self, 
-        question: str, 
-        filters: Optional[DashboardFilters] = None
-    ) -> str:
+    def _extract_requested_top_n(
+        self,
+        question: str,
+        *,
+        default: int = 10,
+        min_n: int = 1,
+        max_n: int = 1000,
+    ) -> int:
+        match = re.search(r"\btop\s+(\d{1,4})\b", (question or "").lower())
+        if not match:
+            requested = default
+        else:
+            try:
+                requested = int(match.group(1))
+            except Exception:
+                requested = default
+
+        requested = max(min_n, min(int(requested), max_n))
+        return requested
+
+    def _maybe_build_top_clients_by_aov_sql_template(self, question: str) -> str | None:
+        """
+        Deterministic fallback for: "Top N clients/customers by AOV".
+
+        This bypasses the LLM for a highly common/structured query pattern that can
+        otherwise fail due to non-SQL or policy-filtered responses.
+        """
+        q = (question or "").strip()
+        if not q:
+            return None
+
+        q_lower = q.lower()
+        if not re.search(r"\btop\s+\d{1,4}\b", q_lower):
+            return None
+        if not (re.search(r"\baov\b", q_lower) or "average order value" in q_lower):
+            return None
+        if not re.search(r"\b(clients?|customers?)\b", q_lower):
+            return None
+
+        limit = self._extract_requested_top_n(q, default=10, min_n=1, max_n=1000)
+
+        if settings.db_dialect == "postgresql":
+            revenue_expr = (
+                "NULLIF(regexp_replace(order_price_in_aed::text, '[^0-9.+-]', '', 'g'), '')::double precision"
+            )
+            aov_expr = (
+                f"ROUND((SUM({revenue_expr}) / NULLIF(COUNT(DISTINCT order_number), 0))::numeric, 2)::double precision"
+            )
+        else:
+            aov_expr = "ROUND(SUM(order_price_in_aed) / NULLIF(COUNT(DISTINCT order_number), 0), 2)"
+
+        return (
+            "SELECT\n"
+            "  client_name,\n"
+            f"  {aov_expr} AS aov\n"
+            "FROM fact_orders\n"
+            f"WHERE {FILTER_PLACEHOLDER_TOKEN}\n"
+            "GROUP BY 1\n"
+            "ORDER BY aov DESC\n"
+            f"LIMIT {limit};"
+        )
+
+    def generate_sql(self, question: str, filters: Optional[DashboardFilters] = None) -> str:
         """
         Generate SQL query from natural language question.
-        
+
         Args:
             question: Natural language question
             filters: Dashboard filter state to inject into query
-            
+
         Returns:
             str: Generated SQL query
-            
+
         Raises:
             TimeoutError: If LLM request times out
             Exception: If SQL generation fails
         """
-        # Build the prompt
+        deterministic = self._maybe_build_top_clients_by_aov_sql_template(question)
+        if deterministic:
+            return deterministic
+
         prompt = self._build_sql_prompt(question, filters)
-        
-        # Call LLM with timeout
-        try:
-            raw_response = self._invoke_llm_with_timeout(prompt)
-        except TimeoutError:
-            raise
-        except Exception as e:
-            raise Exception(f"LLM invocation failed: {str(e)}")
-        
-        # Extract and clean SQL
+        raw_response = self._invoke_llm_with_timeout(prompt)
         sql_query = self.extract_sql_from_response(raw_response)
         
         # Basic validation
