@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     LLM_MAX_OUTPUT_TOKENS: int = 512
     LLM_RETRIES: int = 2
     SQL_TIMEOUT: int = 30  # seconds
+    # Optional fallback model for "retry/repair" paths (e.g., preview/pro models).
+    # When set, the backend uses this model for SQL generation retries and SQL repair prompts.
+    LLM_FALLBACK_MODEL: Optional[str] = None
+    # Only used on fallback/retry/repair LLM calls.
+    LLM_FALLBACK_MAX_OUTPUT_TOKENS: int = 1024
+    # Total attempts for SQL generation (initial + retries). Default 2 == 1 retry.
+    LLM_SQL_GENERATION_MAX_ATTEMPTS: int = 2
     # When SQL execution fails, optionally let the LLM attempt a single repair of the SQL template.
     # Set to 0 to disable (recommended for strict/low-latency deployments).
     LLM_SQL_REPAIR_MAX_ATTEMPTS: int = 1

@@ -52,6 +52,9 @@ def _load_llm_service_module():
             self.LLM_MAX_OUTPUT_TOKENS = 512
             self.LLM_RETRIES = 0
             self.SQL_TIMEOUT = 30
+            self.LLM_FALLBACK_MODEL = None
+            self.LLM_FALLBACK_MAX_OUTPUT_TOKENS = 1024
+            self.LLM_SQL_GENERATION_MAX_ATTEMPTS = 2
 
         @property
         def db_dialect(self) -> str:
@@ -95,7 +98,7 @@ def _load_llm_service_module():
         def __init__(self, _config):
             pass
 
-        def generate_text(self, _prompt: str) -> str:  # pragma: no cover
+        def generate_text(self, _prompt: str, **_kwargs) -> str:  # pragma: no cover
             raise GeminiClientError("GeminiClient is not used in these tests")
 
     def can_check_gemini_connection(**_kwargs) -> bool:
@@ -315,3 +318,103 @@ class TestLLMServicePostgresSafety(unittest.TestCase):
         self.assertIn("WHERE is_test = 0", injected)
         self.assertNotIn("__MUNERO_FILTERS__", injected)
         self.assertIsInstance(params, dict)
+
+    def test_generate_sql_profit_margin_kpi_sqlite_is_deterministic(self):
+        settings = self.llm_service.settings
+        settings.DB_URI = "sqlite:////tmp/munero_test.sqlite"
+
+        service = self.llm_service.LLMService()
+        sql = service.generate_sql("what is my margin", self.llm_service.DashboardFilters())
+
+        self.assertIn("FROM fact_orders", sql)
+        self.assertIn("WHERE __MUNERO_FILTERS__", sql)
+        self.assertIn("AS profit_margin", sql)
+        self.assertTrue(sql.strip().endswith(";"))
+
+    def test_generate_sql_profit_margin_kpi_postgres_is_type_safe(self):
+        settings = self.llm_service.settings
+        settings.DB_URI = "postgresql+psycopg://user:pass@localhost:5432/db"
+
+        service = self.llm_service.LLMService()
+        sql = service.generate_sql("what is my margin", self.llm_service.DashboardFilters())
+
+        self.assertIn("FROM fact_orders", sql)
+        self.assertIn("WHERE __MUNERO_FILTERS__", sql)
+        self.assertIn("AS profit_margin", sql)
+        self.assertIn("regexp_replace(order_price_in_aed::text", sql)
+        self.assertIn("regexp_replace(cogs_in_aed::text", sql)
+        self.assertIn("::numeric, 2)::double precision", sql)
+
+    def test_generate_sql_negative_margin_by_brand_sqlite_is_deterministic(self):
+        settings = self.llm_service.settings
+        settings.DB_URI = "sqlite:////tmp/munero_test.sqlite"
+
+        service = self.llm_service.LLMService()
+        sql = service.generate_sql("Which brands have negative margins?", self.llm_service.DashboardFilters())
+
+        self.assertIn("WITH agg AS", sql)
+        self.assertIn("FROM fact_orders", sql)
+        self.assertIn("WHERE __MUNERO_FILTERS__", sql)
+        self.assertIn("product_brand", sql)
+        self.assertIn("AS profit_margin", sql)
+        self.assertIn("AS total_revenue", sql)
+        self.assertIn("AS total_cogs", sql)
+        self.assertTrue(sql.strip().endswith(";"))
+
+    def test_generate_sql_negative_margin_by_supplier_postgres_is_type_safe(self):
+        settings = self.llm_service.settings
+        settings.DB_URI = "postgresql+psycopg://user:pass@localhost:5432/db"
+
+        service = self.llm_service.LLMService()
+        sql = service.generate_sql("Which suppliers have negative margins?", self.llm_service.DashboardFilters())
+
+        self.assertIn("WITH agg AS", sql)
+        self.assertIn("FROM fact_orders", sql)
+        self.assertIn("WHERE __MUNERO_FILTERS__", sql)
+        self.assertIn("supplier_name", sql)
+        self.assertIn("regexp_replace(order_price_in_aed::text", sql)
+        self.assertIn("regexp_replace(cogs_in_aed::text", sql)
+        self.assertIn("::numeric, 2)::double precision", sql)
+
+    def test_insert_filters_placeholder_adds_where_when_missing(self):
+        service = self.llm_service.LLMService()
+        sql = "SELECT client_name FROM fact_orders GROUP BY 1;"
+        rebuilt = service._maybe_insert_filters_placeholder(sql)
+        self.assertIsInstance(rebuilt, str)
+        self.assertIn("WHERE __MUNERO_FILTERS__", rebuilt)
+        self.assertIn("GROUP BY 1", rebuilt)
+
+    def test_insert_filters_placeholder_wraps_existing_where(self):
+        service = self.llm_service.LLMService()
+        sql = "SELECT 1 AS value FROM fact_orders WHERE client_country = 'AE';"
+        rebuilt = service._maybe_insert_filters_placeholder(sql)
+        self.assertIsInstance(rebuilt, str)
+        self.assertIn("WHERE __MUNERO_FILTERS__ AND (client_country = 'AE')", rebuilt)
+        self.assertTrue(rebuilt.strip().endswith(";"))
+
+    def test_insert_filters_placeholder_does_not_touch_join_queries(self):
+        service = self.llm_service.LLMService()
+        sql = "SELECT 1 FROM fact_orders JOIN dim_customer ON fact_orders.customer_id = dim_customer.customer_id;"
+        rebuilt = service._maybe_insert_filters_placeholder(sql)
+        self.assertIsNone(rebuilt)
+
+    def test_generate_sql_retries_when_missing_token_and_not_insertable(self):
+        settings = self.llm_service.settings
+        settings.DB_URI = "sqlite:////tmp/munero_test.sqlite"
+        settings.LLM_SQL_GENERATION_MAX_ATTEMPTS = 2
+
+        service = self.llm_service.LLMService()
+        calls = {"n": 0}
+
+        def _fake_invoke(_prompt: str, **_kwargs) -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return "SELECT 1;"
+            return "SELECT 1 AS value FROM fact_orders WHERE __MUNERO_FILTERS__;"
+
+        service._invoke_llm_with_timeout = _fake_invoke  # type: ignore[assignment]
+        sql = service.generate_sql("show me something random", self.llm_service.DashboardFilters())
+
+        self.assertEqual(calls["n"], 2)
+        self.assertIn("FROM fact_orders", sql)
+        self.assertIn("WHERE __MUNERO_FILTERS__", sql)

@@ -39,12 +39,12 @@ class GeminiClient:
         except Exception:
             pass
 
-    def _build_url(self) -> str:
+    def _build_url(self, *, model: Optional[str] = None) -> str:
         base = self._config.base_url.rstrip("/")
-        model = self._config.model.strip()
-        if not model:
+        chosen_model = (model if model is not None else self._config.model).strip()
+        if not chosen_model:
             raise GeminiClientError("Gemini model is not configured.")
-        return f"{base}/models/{model}:generateContent"
+        return f"{base}/models/{chosen_model}:generateContent"
 
     def _parse_text(self, payload: dict[str, Any]) -> str:
         candidates = payload.get("candidates") or []
@@ -61,7 +61,13 @@ class GeminiClient:
             raise GeminiClientError("Gemini returned empty text.")
         return text
 
-    def generate_text(self, prompt: str) -> str:
+    def generate_text(
+        self,
+        prompt: str,
+        *,
+        model: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
+    ) -> str:
         """
         Generate a text response from Gemini for a single user prompt.
 
@@ -73,13 +79,18 @@ class GeminiClient:
         if not api_key:
             raise GeminiClientError("LLM API key is not configured.")
 
-        url = self._build_url()
+        chosen_max_tokens = (
+            int(max_output_tokens)
+            if max_output_tokens is not None
+            else int(self._config.max_output_tokens)
+        )
+        url = self._build_url(model=model)
         headers = {"x-goog-api-key": api_key}
         body = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": float(self._config.temperature),
-                "maxOutputTokens": int(self._config.max_output_tokens),
+                "maxOutputTokens": chosen_max_tokens,
             },
         }
 

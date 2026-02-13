@@ -268,8 +268,11 @@ def chat_with_data(request: ChatRequest):
                 label="Filter injection error",
                 exc=e,
                 prompt_text=prompt_text,
+                sql_text=sql_template,
                 prompt_len=prompt_len,
                 prompt_sha=prompt_sha,
+                sql_len=len(sql_template or "") if isinstance(sql_template, str) else 0,
+                sql_sha=short_sha256(sql_template) if isinstance(sql_template, str) else None,
             )
             return ChatResponse(
                 answer_text="I couldn't generate a safe query for your request. Please try rephrasing it.",
@@ -278,7 +281,7 @@ def chat_with_data(request: ChatRequest):
                 chart_config=None,
                 row_count=0,
                 warnings=[],
-                error="Invalid request.",
+                error=f"Invalid request. (id={correlation_id})",
             )
         except TimeoutError as e:
             _log_exception(
@@ -576,7 +579,7 @@ def chat_with_data(request: ChatRequest):
                     chart_config=None,
                     row_count=0,
                     warnings=warnings,
-                    error="SQL execution failed.",
+                    error=f"SQL execution failed. (id={correlation_id})",
                 )
         except Exception as e:
             _log_exception(
@@ -597,7 +600,7 @@ def chat_with_data(request: ChatRequest):
                 chart_config=None,
                 row_count=0,
                 warnings=[],
-                error="SQL execution failed."
+                error=f"SQL execution failed. (id={correlation_id})",
             )
         
         # =====================================================================
