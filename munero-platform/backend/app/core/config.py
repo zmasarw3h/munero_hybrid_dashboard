@@ -4,6 +4,7 @@ Centralized settings for database, LLM, and application behavior.
 """
 import ast
 import json
+import re
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Optional, List
@@ -30,6 +31,9 @@ class Settings(BaseSettings):
     #   CORS_ORIGINS=http://localhost:3000,http://localhost:3001
     #   CORS_ORIGINS=["http://localhost:3000","http://localhost:3001"]
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001"
+    # Optional: Starlette CORS allow_origin_regex for dynamic preview domains (e.g. Vercel).
+    # Example: ^https://munero-hybrid-dashboard(-[a-z0-9-]+)?\\.vercel\\.app$
+    CORS_ORIGINS_REGEX: Optional[str] = None
     
     # Database
     DB_FILE: str = str(Path(__file__).parent.parent.parent.parent / "data" / "munero.sqlite")
@@ -171,6 +175,26 @@ class Settings(BaseSettings):
             origins.append(origin)
 
         return origins
+
+    @property
+    def cors_origins_regex(self) -> Optional[str]:
+        raw_value = (self.CORS_ORIGINS_REGEX or "").strip()
+        if not raw_value:
+            return None
+
+        value = raw_value.strip()
+        # Some hosting dashboards wrap env var values in quotes; be tolerant.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1].strip()
+        if not value:
+            return None
+
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"Invalid CORS_ORIGINS_REGEX: {exc}") from exc
+
+        return value
 
     @property
     def db_dialect(self) -> str:

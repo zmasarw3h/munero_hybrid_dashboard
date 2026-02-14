@@ -21,10 +21,19 @@ app = FastAPI(
     debug=settings.DEBUG
 )
 
+# Optional: allow dynamic origins via regex (e.g. Vercel preview deployments).
+cors_origin_regex: str | None = None
+try:
+    cors_origin_regex = settings.cors_origins_regex
+except Exception as exc:
+    cors_origin_regex = None
+    print(f"⚠️  Invalid CORS_ORIGINS_REGEX ignored: {exc}")
+
 # Configure CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
+    allow_origin_regex=cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,6 +58,7 @@ async def startup_event():
     print(f"🗄️  DB dialect: {settings.db_dialect}")
     print(f"🔗 DB URL: {_safe_db_url(settings.DB_URI)}")
     print(f"🌐 CORS origins: {settings.cors_origins_list}")
+    print(f"🌐 CORS origin regex: {cors_origin_regex}")
     print(f"🤖 LLM provider: {settings.LLM_PROVIDER}")
     print(f"🤖 LLM model: {settings.LLM_MODEL}")
     print(f"🔗 LLM base URL: {settings.LLM_BASE_URL}")
@@ -56,7 +66,11 @@ async def startup_event():
 
     if not settings.DEBUG:
         cors = settings.cors_origins_list
-        if cors and all(("localhost" in origin or "127.0.0.1" in origin) for origin in cors):
+        if (
+            cors_origin_regex is None
+            and cors
+            and all(("localhost" in origin or "127.0.0.1" in origin) for origin in cors)
+        ):
             print("⚠️  CORS_ORIGINS appears localhost-only; hosted frontends will fail preflight (OPTIONS 400).")
     
     # Test database connectivity
