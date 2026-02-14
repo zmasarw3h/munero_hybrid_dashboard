@@ -94,7 +94,10 @@ export class APIClient {
         try {
             // Render free-tier services can sleep; the first request may fail
             // with a transient network error while the service starts.
-            const maxAttempts = 8;
+            // IMPORTANT: Do not retry non-idempotent AI POSTs; backend has its own
+            // retry/fallback logic and client retries can multiply LLM costs.
+            const isChatPost = method === 'POST' && endpoint.startsWith('/api/chat');
+            const maxAttempts = isChatPost ? 1 : 8;
             let lastError: unknown = null;
 
             for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -249,9 +252,16 @@ export class APIClient {
      * @param metric 'orders' or 'revenue'
      * @param days Number of days of data (default 30)
      */
-    async getSparklineData(metric: 'orders' | 'revenue', days: number = 30): Promise<SparklineResponse> {
+    async getSparklineData(
+        filters: DashboardFilters,
+        metric: 'orders' | 'revenue',
+        days: number = 30
+    ): Promise<SparklineResponse> {
         const params = new URLSearchParams({ days: days.toString() });
-        return this.request<SparklineResponse>(`/api/dashboard/sparkline/${metric}?${params.toString()}`);
+        return this.request<SparklineResponse>(`/api/dashboard/sparkline/${metric}?${params.toString()}`, {
+            method: 'POST',
+            body: JSON.stringify(filters),
+        });
     }
 
     /**

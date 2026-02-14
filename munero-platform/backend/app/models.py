@@ -143,6 +143,7 @@ class LeaderboardRow(BaseModel):
     Used for Top Clients, Top Brands, Top Suppliers, Top Products widgets.
     """
     label: str                          # Entity name (client, brand, supplier, product)
+    product_type: Optional[str] = None  # For product leaderboards: 'gift_card' | 'merchandise'
     revenue: float                      # Total revenue generated
     orders: int                         # Number of distinct orders
     margin_pct: Optional[float] = None  # Profit margin: (Revenue - COGS) / Revenue * 100
@@ -171,7 +172,6 @@ class FilterOptionsResponse(BaseModel):
     brands: List[str]
     suppliers: List[str]
     countries: List[str]
-    currencies: List[str]
 
 
 # ============================================================================

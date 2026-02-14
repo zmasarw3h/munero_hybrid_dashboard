@@ -10,13 +10,6 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { MultiSelect } from '@/components/ui/multi-select';
 import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from '@/components/ui/select';
-import {
     Popover,
     PopoverContent,
     PopoverTrigger,
@@ -37,13 +30,11 @@ export function FilterBar() {
         brands: string[];
         suppliers: string[];
         countries: string[];
-        currencies: string[];
     }>({
         clients: [],
         brands: [],
         suppliers: [],
         countries: [],
-        currencies: [],
     });
 
     const [loading, setLoading] = useState(true);
@@ -118,24 +109,10 @@ export function FilterBar() {
 
                     <Separator orientation="vertical" className="h-6" />
 
-                    {/* Currency Selector */}
+                    {/* Currency (AED-only) */}
                     <div className="flex items-center gap-2">
                         <Label className="text-sm text-gray-600">Currency:</Label>
-                        <Select
-                            value={filters.currency}
-                            onValueChange={(value) => setFilter('currency', value)}
-                        >
-                            <SelectTrigger className="h-9 w-[100px]">
-                                <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                                {filterOptions.currencies.map((currency) => (
-                                    <SelectItem key={currency} value={currency}>
-                                        {currency}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
+                        <span className="text-sm font-medium text-gray-900">{filters.currency || 'AED'}</span>
                     </div>
 
                     {/* Country Multi-Select */}

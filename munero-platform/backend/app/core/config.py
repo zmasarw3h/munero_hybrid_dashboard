@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     DB_STATEMENT_TIMEOUT_MS: int = 30000
     # Legacy behavior: return empty DataFrame on query errors.
     # In hosted mode, set to False so outages/misconfig surface as API errors.
-    DB_RETURN_EMPTY_ON_ERROR: bool = True
+    DB_RETURN_EMPTY_ON_ERROR: bool = False
     
     # LLM Configuration
     # Provider name. For hosted deployments, default to Gemini.

@@ -68,6 +68,16 @@ def _sql_date_cast_expr(date_column: str) -> str:
     return date_column
 
 
+def _sql_is_test_predicate() -> str:
+    """
+    Return a SQL predicate that excludes test data (`is_test = 1`) while being tolerant
+    of TEXT/BOOLEAN/NULL values in hosted Postgres.
+    """
+    if settings.db_dialect == "postgresql":
+        return "COALESCE(NULLIF(lower(is_test::text), ''), '0') IN ('0','false','f')"
+    return "COALESCE(NULLIF(lower(CAST(is_test AS TEXT)), ''), '0') IN ('0','false','f')"
+
+
 def _sql_date_label_expr(date_column: str, granularity: Literal["day", "month", "year"]) -> str:
     """
     Build a SQL expression that formats a date column into a string label.
@@ -92,13 +102,19 @@ def _sql_cutoff_from_max_date(date_column: str, *, days: int | None = None, mont
     if settings.db_dialect == "postgresql":
         date_expr = _sql_date_cast_expr(date_column)
         if months is not None:
-            return f"(SELECT (MAX({date_expr}) - INTERVAL '{months} months')::date FROM fact_orders)"
-        return f"(SELECT (MAX({date_expr}) - INTERVAL '{days} days')::date FROM fact_orders)"
+            return (
+                f"(SELECT (MAX({date_expr}) - INTERVAL '{months} months')::date "
+                f"FROM fact_orders WHERE {_sql_is_test_predicate()})"
+            )
+        return (
+            f"(SELECT (MAX({date_expr}) - INTERVAL '{days} days')::date "
+            f"FROM fact_orders WHERE {_sql_is_test_predicate()})"
+        )
 
     # SQLite
     if months is not None:
-        return f"(SELECT date(MAX({date_column}), '-{months} months') FROM fact_orders)"
-    return f"(SELECT date(MAX({date_column}), '-{days} days') FROM fact_orders)"
+        return f"(SELECT date(MAX({date_column}), '-{months} months') FROM fact_orders WHERE {_sql_is_test_predicate()})"
+    return f"(SELECT date(MAX({date_column}), '-{days} days') FROM fact_orders WHERE {_sql_is_test_predicate()})"
 
 
 def build_where_clause(filters: DashboardFilters) -> tuple[str, dict]:
@@ -119,7 +135,8 @@ def build_where_clause(filters: DashboardFilters) -> tuple[str, dict]:
         >>> params
         {'start_date': '2025-01-01', 'country_0': 'UAE'}
     """
-    conditions = ["1=1"]  # Default always true - simplifies AND chaining
+    # Always exclude test data in hosted dashboards.
+    conditions = ["1=1", _sql_is_test_predicate()]  # Default always true - simplifies AND chaining
     params = {}
     order_date_expr = _sql_date_cast_expr("order_date")
 
@@ -377,8 +394,20 @@ def get_sales_trend(filters: DashboardFilters, granularity: Literal['day', 'mont
         return TrendResponse(title=f"Sales & Volume Trend ({granularity.title()})", data=[])
 
     # 2. Calculate Growth (Period over Period)
-    df['revenue_growth'] = df['revenue'].pct_change().fillna(0) * 100
-    df['orders_growth'] = df['orders'].pct_change().fillna(0) * 100
+    df['revenue_growth'] = (
+        df['revenue']
+        .pct_change()
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0)
+        * 100
+    )
+    df['orders_growth'] = (
+        df['orders']
+        .pct_change()
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0)
+        * 100
+    )
 
     # 3. Anomaly Detection (Z-Score)
     # Helper to calculate anomalies safely
@@ -540,6 +569,7 @@ def get_leaderboard(
                 SUM({_sql_numeric_expr("order_price_in_aed")}) as monthly_revenue
             FROM fact_orders
             WHERE {_sql_date_cast_expr("order_date")} >= {_sql_cutoff_from_max_date("order_date", months=6)}
+              AND {_sql_is_test_predicate()}
               AND {db_col} IN ({','.join(entity_placeholders)})
             GROUP BY 1, 2
             ORDER BY 1, 2 ASC
@@ -589,6 +619,7 @@ def get_leaderboard(
                 SELECT product_name, SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue
                 FROM fact_orders
                 WHERE {_sql_date_cast_expr("order_date")} >= :current_start AND {_sql_date_cast_expr("order_date")} <= :current_end
+                  AND {_sql_is_test_predicate()}
                   AND product_name IN ({','.join(entity_placeholders)})
                 GROUP BY product_name
             ),
@@ -596,6 +627,7 @@ def get_leaderboard(
                 SELECT product_name, SUM({_sql_numeric_expr("order_price_in_aed")}) as revenue
                 FROM fact_orders
                 WHERE {_sql_date_cast_expr("order_date")} >= :prior_start AND {_sql_date_cast_expr("order_date")} <= :prior_end
+                  AND {_sql_is_test_predicate()}
                   AND product_name IN ({','.join(entity_placeholders)})
                 GROUP BY product_name
             )
@@ -618,6 +650,41 @@ def get_leaderboard(
                     growth_data[row['product_name']] = round(float(row['growth_pct']), 2)
             logger.info("📈 Growth data calculated (products=%s)", len(growth_data))
 
+    # 5b. Determine product type for product leaderboard rows (gift_card vs merchandise)
+    product_type_by_label: dict[str, str] = {}
+    if dimension == "product" and not df.empty:
+        entities = df["label"].tolist()
+        type_placeholders = [f":ptype_entity_{i}" for i in range(len(entities))]
+        type_params = params.copy()
+        for i, entity in enumerate(entities):
+            type_params[f"ptype_entity_{i}"] = entity
+
+        type_query = f"""
+            SELECT
+                product_name as label,
+                order_type,
+                SUM({_sql_numeric_expr("order_price_in_aed")}) as type_revenue
+            FROM fact_orders
+            WHERE {where_sql}
+              AND product_name IN ({','.join(type_placeholders)})
+            GROUP BY 1, 2
+        """
+        type_df = get_data(type_query, type_params)
+        if not type_df.empty:
+            dominant_types = (
+                type_df.sort_values("type_revenue", ascending=False)
+                .drop_duplicates("label")[["label", "order_type"]]
+            )
+            for _, row in dominant_types.iterrows():
+                order_type = row["order_type"]
+                if pd.isna(order_type):
+                    product_type = "merchandise"
+                elif "gift" in str(order_type).lower() or order_type == "gift_card":
+                    product_type = "gift_card"
+                else:
+                    product_type = "merchandise"
+                product_type_by_label[str(row["label"])] = product_type
+
     # 6. Map to Response
     data_points = []
     for _, row in df.iterrows():
@@ -637,8 +704,11 @@ def get_leaderboard(
         if dimension == 'product' and include_growth:
             failure_rate = mock_failure_rate(str(row['label']))
 
+        product_type = product_type_by_label.get(str(row["label"])) if dimension == "product" else None
+
         data_points.append(LeaderboardRow(
             label=str(row['label']),
+            product_type=product_type,
             revenue=float(row['revenue']),
             orders=int(row['orders']),
             margin_pct=margin,
@@ -800,7 +870,12 @@ def get_client_scatter(filters: DashboardFilters):
     final_df = client_totals.merge(dominant_types, on='client_name', how='left')
     
     # D. Calculate AOV
-    final_df['aov'] = final_df['total_revenue'] / final_df['total_orders']
+    denom = final_df['total_orders'].replace({0: np.nan})
+    final_df['aov'] = (
+        (final_df['total_revenue'] / denom)
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0)
+    )
     
     # Reset index to make client_name a regular column
     final_df = final_df.reset_index()
@@ -882,72 +957,61 @@ def get_filter_options():
     **Response**: Lists of unique string values for each dimension
     """
     logger.info("🔍 Fetching filter options from database")
+    is_test_predicate = _sql_is_test_predicate()
     
     # Query 1: Get distinct clients
-    clients_query = """
+    clients_query = f"""
         SELECT DISTINCT client_name 
         FROM fact_orders 
-        WHERE client_name IS NOT NULL
+        WHERE {is_test_predicate} AND client_name IS NOT NULL
         ORDER BY client_name
     """
     clients_df = get_data(clients_query)
     clients = clients_df['client_name'].tolist() if not clients_df.empty else []
     
     # Query 2: Get distinct brands
-    brands_query = """
+    brands_query = f"""
         SELECT DISTINCT product_brand 
         FROM fact_orders 
-        WHERE product_brand IS NOT NULL
+        WHERE {is_test_predicate} AND product_brand IS NOT NULL
         ORDER BY product_brand
     """
     brands_df = get_data(brands_query)
     brands = brands_df['product_brand'].tolist() if not brands_df.empty else []
     
     # Query 3: Get distinct suppliers
-    suppliers_query = """
+    suppliers_query = f"""
         SELECT DISTINCT supplier_name 
         FROM fact_orders 
-        WHERE supplier_name IS NOT NULL
+        WHERE {is_test_predicate} AND supplier_name IS NOT NULL
         ORDER BY supplier_name
     """
     suppliers_df = get_data(suppliers_query)
     suppliers = suppliers_df['supplier_name'].tolist() if not suppliers_df.empty else []
     
     # Query 4: Get distinct countries
-    countries_query = """
+    countries_query = f"""
         SELECT DISTINCT client_country 
         FROM fact_orders 
-        WHERE client_country IS NOT NULL
+        WHERE {is_test_predicate} AND client_country IS NOT NULL
         ORDER BY client_country
     """
     countries_df = get_data(countries_query)
     countries = countries_df['client_country'].tolist() if not countries_df.empty else []
     
-    # Query 5: Get distinct currencies
-    currencies_query = """
-        SELECT DISTINCT currency 
-        FROM fact_orders 
-        WHERE currency IS NOT NULL
-        ORDER BY currency
-    """
-    currencies_df = get_data(currencies_query)
-    currencies = currencies_df['currency'].tolist() if not currencies_df.empty else []
-    
     logger.info(
-        "✅ Filter options loaded (clients=%s, brands=%s, suppliers=%s, countries=%s, currencies=%s)",
+        "✅ Filter options loaded (clients=%s, brands=%s, suppliers=%s, countries=%s)",
         len(clients),
         len(brands),
         len(suppliers),
         len(countries),
-        len(currencies),
     )
     
     return FilterOptionsResponse(
         clients=clients,
         brands=brands,
         suppliers=suppliers,
-        countries=countries,
-        currencies=currencies
+        countries=countries
     )
 
 
@@ -1127,6 +1191,7 @@ def get_sparkline_data(metric: str, days: int = 30):
             {agg_expr} as value
         FROM fact_orders
         WHERE {order_date_expr} >= {cutoff_expr}
+          AND {_sql_is_test_predicate()}
         GROUP BY 1
         ORDER BY 1
     """
@@ -1144,6 +1209,83 @@ def get_sparkline_data(metric: str, days: int = 30):
     
     logger.info("✅ Retrieved sparkline points (metric=%s, count=%s)", metric, len(data))
     
+    return SparklineResponse(metric=metric, data=data)
+
+
+@router.post("/sparkline/{metric}", response_model=SparklineResponse)
+def get_sparkline_data_filtered(filters: DashboardFilters, metric: str, days: int = 30):
+    """
+    Filter-aware sparkline endpoint for KPI cards.
+
+    Semantics:
+    - Applies all active filters (including `is_test = 0`)
+    - Uses the last `days` days ending at `filters.end_date`
+    - Bounded by `filters.start_date` when provided
+    """
+    if metric not in ['orders', 'revenue']:
+        raise HTTPException(status_code=400, detail=f"Invalid metric '{metric}'. Must be 'orders' or 'revenue'")
+
+    days_int = int(days)
+    if days_int <= 0:
+        raise HTTPException(status_code=400, detail="days must be >= 1")
+
+    # Determine end_date anchor (prefer explicit filter end_date).
+    end_date = filters.end_date
+    if end_date is None:
+        where_sql, params = build_where_clause(filters)
+        max_date_query = f"""
+            SELECT MAX({_sql_date_cast_expr("order_date")}) as max_date
+            FROM fact_orders
+            WHERE {where_sql}
+        """
+        max_date_df = get_data(max_date_query, params)
+        if max_date_df.empty or max_date_df.iloc[0].get("max_date") is None:
+            return SparklineResponse(metric=metric, data=[])
+        max_date_value = max_date_df.iloc[0]["max_date"]
+        end_date = max_date_value if isinstance(max_date_value, datetime) else datetime.fromisoformat(str(max_date_value))
+        end_date = end_date.date()
+
+    # Compute the sparkline window.
+    window_start = end_date - timedelta(days=days_int - 1)
+    if filters.start_date and filters.start_date > window_start:
+        window_start = filters.start_date
+
+    sparkline_filters = filters.model_copy(update={"start_date": window_start, "end_date": end_date})
+    where_sql, params = build_where_clause(sparkline_filters)
+
+    logger.info(
+        "📊 Fetching filtered sparkline data (metric=%s, days=%s, start=%s, end=%s)",
+        metric,
+        days_int,
+        window_start,
+        end_date,
+    )
+    _log_filters_debug("📊 Filtered Sparkline Query", sparkline_filters)
+
+    if metric == "orders":
+        agg_expr = "COUNT(DISTINCT order_number)"
+    else:
+        agg_expr = f"SUM({_sql_numeric_expr('order_price_in_aed')})"
+
+    order_date_expr = _sql_date_cast_expr("order_date")
+    query = f"""
+        SELECT
+            {order_date_expr} as date,
+            {agg_expr} as value
+        FROM fact_orders
+        WHERE {where_sql}
+        GROUP BY 1
+        ORDER BY 1
+    """
+
+    df = get_data(query, params)
+    if df.empty:
+        return SparklineResponse(metric=metric, data=[])
+
+    data = [
+        SparklinePoint(date=str(row['date']), value=float(row['value'] or 0))
+        for _, row in df.iterrows()
+    ]
     return SparklineResponse(metric=metric, data=data)
 
 
@@ -1410,15 +1552,15 @@ def get_catalog_kpis(filters: DashboardFilters):
     logger.info("📦 Executing Catalog KPIs Query")
     _log_filters_debug("📦 Catalog KPIs Query", filters)
 
-    # Calculate prior period for comparison
+    # Calculate prior period for comparison (same duration immediately before current start_date).
+    prior_where_sql = None
+    prior_params = None
     if filters.start_date and filters.end_date:
         date_range_days = (filters.end_date - filters.start_date).days
         prior_start = filters.start_date - timedelta(days=date_range_days + 1)
         prior_end = filters.start_date - timedelta(days=1)
-        prior_params = params.copy()
-        prior_params["start_date"] = str(prior_start)
-        prior_params["end_date"] = str(prior_end)
-        prior_where_sql = where_sql.replace(f":start_date", f"'{prior_start}'").replace(f":end_date", f"'{prior_end}'")
+        prior_filters = filters.model_copy(update={"start_date": prior_start, "end_date": prior_end})
+        prior_where_sql, prior_params = build_where_clause(prior_filters)
     else:
         prior_start = None
         prior_end = None
@@ -1488,28 +1630,14 @@ def get_catalog_kpis(filters: DashboardFilters):
     currency_count_change = None
     avg_margin_change = None
 
-    if prior_start and prior_end:
-        # Prior SKUs
+    if prior_where_sql and prior_params:
+        # Prior SKUs (apply same non-date filters as current period)
         prior_sku_query = f"""
             SELECT COUNT(DISTINCT product_sku) as active_skus
             FROM fact_orders
-            WHERE {_sql_date_cast_expr("order_date")} >= :prior_start AND {_sql_date_cast_expr("order_date")} <= :prior_end
-              AND product_sku IS NOT NULL AND {_sql_numeric_expr("quantity")} > 0
+            WHERE {prior_where_sql} AND product_sku IS NOT NULL AND {_sql_numeric_expr("quantity")} > 0
         """
-        prior_sku_params = {"prior_start": str(prior_start), "prior_end": str(prior_end)}
-
-        # Add other filters (excluding date filters which we override)
-        if filters.countries:
-            for i, val in enumerate(filters.countries):
-                prior_sku_params[f"country_{i}"] = val
-        if filters.brands:
-            for i, val in enumerate(filters.brands):
-                prior_sku_params[f"brand_{i}"] = val
-        if filters.suppliers:
-            for i, val in enumerate(filters.suppliers):
-                prior_sku_params[f"supplier_{i}"] = val
-
-        prior_sku_df = get_data(prior_sku_query, prior_sku_params)
+        prior_sku_df = get_data(prior_sku_query, prior_params)
         if not prior_sku_df.empty:
             prior_skus = int(prior_sku_df.iloc[0]['active_skus'] or 0)
             if prior_skus > 0:
@@ -1519,9 +1647,9 @@ def get_catalog_kpis(filters: DashboardFilters):
         prior_currency_query = f"""
             SELECT COUNT(DISTINCT currency) as currency_count
             FROM fact_orders
-            WHERE {_sql_date_cast_expr("order_date")} >= :prior_start AND {_sql_date_cast_expr("order_date")} <= :prior_end
+            WHERE {prior_where_sql}
         """
-        prior_currency_df = get_data(prior_currency_query, prior_sku_params)
+        prior_currency_df = get_data(prior_currency_query, prior_params)
         if not prior_currency_df.empty:
             prior_currencies = int(prior_currency_df.iloc[0]['currency_count'] or 0)
             currency_count_change = currency_count - prior_currencies
@@ -1532,10 +1660,10 @@ def get_catalog_kpis(filters: DashboardFilters):
                 ({_sql_numeric_expr("order_price_in_aed")} - COALESCE({_sql_numeric_expr("cogs_in_aed")}, 0)) / NULLIF({_sql_numeric_expr("order_price_in_aed")}, 0) * 100
             ) as avg_margin
             FROM fact_orders
-            WHERE {_sql_date_cast_expr("order_date")} >= :prior_start AND {_sql_date_cast_expr("order_date")} <= :prior_end
+            WHERE {prior_where_sql}
               AND {_sql_numeric_expr("cogs_in_aed")} > 0 AND {_sql_numeric_expr("order_price_in_aed")} > 0
         """
-        prior_margin_df = get_data(prior_margin_query, prior_sku_params)
+        prior_margin_df = get_data(prior_margin_query, prior_params)
         if not prior_margin_df.empty and prior_margin_df.iloc[0]['avg_margin'] is not None and avg_margin is not None:
             prior_margin = float(prior_margin_df.iloc[0]['avg_margin'])
             avg_margin_change = round(avg_margin - prior_margin, 2)

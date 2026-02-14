@@ -94,11 +94,7 @@ export default function CatalogPage() {
       setProducts(
         productsRes.data.map((product: LeaderboardRow) => ({
           label: product.label,
-          product_type:
-            'product_type' in product &&
-              (product as LeaderboardRow & { product_type?: ProductRow['product_type'] }).product_type
-              ? (product as LeaderboardRow & { product_type: ProductRow['product_type'] }).product_type
-              : 'merchandise',
+          product_type: product.product_type === 'gift_card' ? 'gift_card' : 'merchandise',
           revenue: product.revenue,
           growth_pct: product.growth_pct ?? null,
           failure_rate: product.failure_rate ?? Math.random() * 5, // Mock if not provided

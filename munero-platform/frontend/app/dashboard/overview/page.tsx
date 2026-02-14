@@ -61,8 +61,8 @@ export default function OverviewPage() {
                 apiClient.getHeadlineStats(apiFilters),
                 apiClient.getTrend(apiFilters, granularity),
                 apiClient.getMeta().catch(() => null),
-                apiClient.getSparklineData('orders', 30),
-                apiClient.getSparklineData('revenue', 30),
+                apiClient.getSparklineData(apiFilters, 'orders', 30),
+                apiClient.getSparklineData(apiFilters, 'revenue', 30),
                 apiClient.getStuckOrders(5),
                 apiClient.getLeaderboard(apiFilters, 'order_type'),
             ]);

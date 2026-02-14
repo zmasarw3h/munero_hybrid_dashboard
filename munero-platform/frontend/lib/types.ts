@@ -94,6 +94,7 @@ export interface ScatterResponse {
 
 export interface LeaderboardRow {
     label: string;                      // Entity name (client, brand, supplier, product)
+    product_type?: string | null;       // For product leaderboards: 'gift_card' | 'merchandise'
     revenue: number;                    // Total revenue generated
     orders: number;                     // Number of distinct orders
     margin_pct: number | null;          // Profit margin: (Revenue - COGS) / Revenue * 100
@@ -114,7 +115,6 @@ export interface FilterOptionsResponse {
     brands: string[];
     suppliers: string[];
     countries: string[];
-    currencies: string[];
 }
 
 export interface AIAnalysisResponse {
